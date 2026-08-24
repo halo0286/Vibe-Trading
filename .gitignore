@@ -118,3 +118,8 @@ bench_report.json
 # Grounding ledger persisted by ad-hoc verification scripts into tests/
 agent/tests/artifacts/
 .idea/*
+# graphify-out: AST/semantic extraction cache (rebuildable, not needed in repo)
+graphify-out/cache/
+graphify-out/.graphify_analysis.json
+graphify-out/.graphify_root
+.graphify_labels.json.sig
