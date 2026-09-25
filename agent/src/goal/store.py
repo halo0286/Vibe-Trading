@@ -565,13 +565,17 @@ class GoalStore:
                 (session_id,),
             ).fetchone()
             count = int(row[0]) if row else 0
-            for table in (
+            # S-2 fix: table names are hardcoded constants; validated against
+            # allowlist to prevent SQL injection if refactored to accept input.
+            _GOAL_TABLES = (
                 "goal_audits",
                 "goal_evidence",
                 "goal_criteria",
                 "goal_claims",
                 "goals",
-            ):
+            )
+            for table in _GOAL_TABLES:
+                assert table.isidentifier(), f"S-2 guard: invalid table name {table!r}"
                 self._conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (session_id,))
         return count
 

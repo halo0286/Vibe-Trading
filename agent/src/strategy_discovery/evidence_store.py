@@ -163,7 +163,10 @@ class EvidenceStore:
     from the evidence harness computing over real backtest run artifacts.
     """
 
+    # S-2 fix: hardcoded table name; isidentifier() guard prevents injection
+    # if TABLE is ever overridden or refactored to accept external input.
     TABLE = "strategy_regime_evidence"
+    assert TABLE.isidentifier(), f"S-2 guard: invalid table name {TABLE!r}"
 
     def __init__(self, db_path: str | Path | None = None) -> None:
         """Open (and initialize) the evidence database.

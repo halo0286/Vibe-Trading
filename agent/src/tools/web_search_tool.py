@@ -53,7 +53,9 @@ def _aliyun_iqs_search(query: str, max_results: int = 5) -> list[dict] | None:
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
     )
     resp = urllib.request.urlopen(req, timeout=10)
-    data = _json.loads(resp.read().decode("utf-8"))
+    # S-3/P-7 fix: cap response size to prevent OOM from malicious/large responses
+    raw = resp.read(10 * 1024 * 1024)  # 10 MB max
+    data = _json.loads(raw.decode("utf-8"))
     out: list[dict] = []
     for item in data.get("pageItems", [])[:max_results]:
         out.append({
@@ -80,7 +82,8 @@ def _bing_cn_search(query: str, max_results: int = 5) -> list[dict]:
     req = urllib.request.Request(
         url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     )
-    html = urllib.request.urlopen(req, timeout=10).read().decode("utf-8", "ignore")
+    # S-3/P-7 fix: cap response size to prevent OOM
+    html = urllib.request.urlopen(req, timeout=10).read(10 * 1024 * 1024).decode("utf-8", "ignore")
     blocks = _re.findall(r'<li class="b_algo"[^>]*>(.*?)</li>', html, _re.S)
     out: list[dict] = []
     for b in blocks[:max_results]:
@@ -116,7 +119,8 @@ def _sogou_search(query: str, max_results: int = 5) -> list[dict]:
     req = urllib.request.Request(
         url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     )
-    html = urllib.request.urlopen(req, timeout=10).read().decode("utf-8", "ignore")
+    # S-3/P-7 fix: cap response size to prevent OOM
+    html = urllib.request.urlopen(req, timeout=10).read(10 * 1024 * 1024).decode("utf-8", "ignore")
     blocks = _re.split(r'<div class="vrwrap"', html)[1:]
     out: list[dict] = []
     for b in blocks[:max_results]:

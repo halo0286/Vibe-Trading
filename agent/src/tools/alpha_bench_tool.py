@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import io
+import pickle
 import html
 import json
 import logging
@@ -211,6 +213,45 @@ def _cache_mac(key: bytes, blob: bytes) -> str:
     return hmac.new(key, blob, hashlib.sha256).hexdigest()
 
 
+# S-1 fix: allowlisted classes for safe unpickling.
+_SAFE_PICKLE_CLASSES = {
+    # builtins
+    ("builtins", "dict"), ("builtins", "list"), ("builtins", "tuple"),
+    ("builtins", "str"), ("builtins", "int"), ("builtins", "float"),
+    ("builtins", "bytes"), ("builtins", "set"), ("builtins", "frozenset"),
+    ("builtins", "bool"), ("builtins", "NoneType"),
+    # numpy (panel data arrays/dtypes)
+    ("numpy", "ndarray"), ("numpy", "dtype"), ("numpy.core.multiarray", "_reconstruct"),
+    ("numpy", "int64"), ("numpy", "float64"), ("numpy", "bool_"),
+    # pandas (DataFrames/Series in cache)
+    ("pandas.core.frame", "DataFrame"), ("pandas.core.series", "Series"),
+    ("pandas.core.indexes.base", "Index"),
+    ("pandas.core.indexes.datetimes", "DatetimeIndex"),
+    ("pandas._libs.tslibs.timestamps", "Timestamp"),
+    ("pandas._libs.tslibs.period", "Period"),
+    # datetime
+    ("datetime", "datetime"), ("datetime", "date"), ("datetime", "timedelta"),
+    # collections
+    ("collections", "OrderedDict"), ("collections", "defaultdict"),
+}
+
+
+class _RestrictedUnpickler(pickle.Unpickler):
+    """Unpickler that only allows pre-approved classes. Blocks RCE gadgets."""
+
+    def find_class(self, module: str, name: str):
+        if (module, name) in _SAFE_PICKLE_CLASSES:
+            return super().find_class(module, name)
+        raise pickle.UnpicklingError(
+            f"blocked unsafe pickle class: {module}.{name}"
+        )
+
+
+def _safe_pickle_loads(blob: bytes):
+    """Deserialize with class allowlist. Raises on disallowed class."""
+    return _RestrictedUnpickler(io.BytesIO(blob)).load()
+
+
 def _read_pickle_cache(cache_path: Path) -> dict[str, pd.DataFrame] | None:
     """Load a pickle cache, authenticating its keyed HMAC sidecar. None on failure.
 
@@ -246,7 +287,10 @@ def _read_pickle_cache(cache_path: Path) -> dict[str, pd.DataFrame] | None:
         return None
 
     try:
-        cached = pickle.loads(blob)  # noqa: S301 — local cache, HMAC-authenticated above
+        # S-1 fix: RestrictedUnpickler limits deserializable classes to prevent
+        # RCE even if HMAC key is compromised. Only allow types that appear in
+        # cached panel data (dict, list, tuple, str, int, float, bytes, numpy).
+        cached = _safe_pickle_loads(blob)
     except Exception as exc:  # noqa: BLE001 — degrade to fresh fetch
         logger.warning("cache unpickle failed (%s); refetching", exc)
         return None
