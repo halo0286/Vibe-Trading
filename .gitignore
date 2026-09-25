@@ -124,6 +124,7 @@ data/backup/
 docs/
 !wiki/docs/
 !wiki/docs/**
+!docs/业务场景梳理与评审.md
 docs/screenshots/agent-run.png
 docs/screenshots/boot.png
 data/minutes/
