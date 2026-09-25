@@ -3038,6 +3038,11 @@ def main():
     global _include_shell_tools, _registry
     import argparse
 
+    # task2 生产级日志系统集成（幂等初始化）
+    from src.logsystem_bootstrap import init_logging
+
+    init_logging()
+
     parser = argparse.ArgumentParser(description="Vibe-Trading MCP Server")
     parser.add_argument(
         "--transport",

@@ -21,6 +21,9 @@ from rich.console import Console
 from cli._version import __version__ as APP_VERSION
 from src.ui_services import build_run_analysis, load_run_context  # noqa: F401
 
+# task2 生产级日志系统集成（终端+文件双输出 / 全链路追踪 / 脱敏 / 自动分析）
+from src.logsystem_bootstrap import init_logging
+
 # UTF-8 on Windows
 import sys as _sys
 for _s in ("stdout", "stderr"):
@@ -126,6 +129,8 @@ from src.api.scheduled_routes import (  # noqa: E402
 
 async def _run_startup_preflight() -> None:
     """Run preflight checks on server startup."""
+    init_logging()  # 初始化 logsystem（幂等）
+
     from src.preflight import run_preflight
 
     from src.config import migrate as _migrate

@@ -174,3 +174,8 @@ bench_report.json
 # Grounding ledger persisted by ad-hoc verification scripts into tests/
 agent/tests/artifacts/
 .idea/*
+
+# task2 logsystem runtime outputs (rolling pid/date files + analysis reports)
+logs/
+agent/src/logsystem/__pycache__/
+*.log
