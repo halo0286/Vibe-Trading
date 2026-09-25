@@ -16,7 +16,7 @@ from typing import Any, Callable, Iterator, Optional
 
 from .logger import log_business_event
 from .masking import mask, mask_value
-from .trace import get_span_id, new_span
+from .trace import get_span_id, new_span, _span_id, _new_span_id
 
 # 当前调用栈（用于记录嵌套调用层级）
 _current_call: contextvars.ContextVar[Optional["CallInfo"]] = contextvars.ContextVar(
@@ -81,38 +81,42 @@ def log_call(
             _cfg = _config_of(loggr)
             fn_name = f"{func.__module__}.{func.__qualname__}"
             started = time.perf_counter()
-            new_span()
-            args_s = _serialize_args(
-                args, kwargs,
-                getattr(_cfg, "max_args_length", 2048),
-                _cfg.effective_sensitive_keys() if _cfg else (),
-                getattr(_cfg, "mask_placeholder", "***") if _cfg else "***",
-            ) if log_args else ""
-            if log_args:
-                log_business_event(loggr, logging.DEBUG, f"{fn_name} in", step=step or fn_name, status="start", extra={"args": args_s})
-            s = step or fn_name
+            # P0 fix: 用 token/reset 确保嵌套 @log_call 时外层 span_id 正确恢复
+            _token_span = _span_id.set(_new_span_id())
             try:
-                result = func(*args, **kwargs)
-            except Exception as e:
+                args_s = _serialize_args(
+                    args, kwargs,
+                    getattr(_cfg, "max_args_length", 2048),
+                    _cfg.effective_sensitive_keys() if _cfg else (),
+                    getattr(_cfg, "mask_placeholder", "***") if _cfg else "***",
+                ) if log_args else ""
+                if log_args:
+                    log_business_event(loggr, logging.DEBUG, f"{fn_name} in", step=step or fn_name, status="start", extra={"args": args_s})
+                s = step or fn_name
+                try:
+                    result = func(*args, **kwargs)
+                except Exception as e:
+                    cost = (time.perf_counter() - started) * 1000
+                    log_business_event(
+                        loggr, logging.ERROR,
+                        f"{fn_name} failed: {type(e).__name__}: {e}",
+                        step=s, status="failed",
+                        error_code=getattr(e, "code", None) or type(e).__name__,
+                        error_msg=str(e),
+                        extra={"cost_ms": round(cost, 3), "exception_type": type(e).__name__,
+                               "stack_trace": traceback.format_exc()[:4000]},
+                    )
+                    raise
                 cost = (time.perf_counter() - started) * 1000
+                extra = {"cost_ms": round(cost, 3)}
+                if log_result:
+                    extra["result"] = repr(mask_value(result, 512))
                 log_business_event(
-                    loggr, logging.ERROR,
-                    f"{fn_name} failed: {type(e).__name__}: {e}",
-                    step=s, status="failed",
-                    error_code=getattr(e, "code", None) or type(e).__name__,
-                    error_msg=str(e),
-                    extra={"cost_ms": round(cost, 3), "exception_type": type(e).__name__,
-                           "stack_trace": traceback.format_exc()[:4000]},
+                    loggr, level, f"{fn_name} out", step=s, status="success", extra=extra,
                 )
-                raise
-            cost = (time.perf_counter() - started) * 1000
-            extra = {"cost_ms": round(cost, 3)}
-            if log_result:
-                extra["result"] = repr(mask_value(result, 512))
-            log_business_event(
-                loggr, level, f"{fn_name} out", step=s, status="success", extra=extra,
-            )
-            return result
+                return result
+            finally:
+                _span_id.reset(_token_span)
 
         @functools.wraps(func)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -120,38 +124,42 @@ def log_call(
             _cfg = _config_of(loggr)
             fn_name = f"{func.__module__}.{func.__qualname__}"
             started = time.perf_counter()
-            new_span()
-            args_s = _serialize_args(
-                args, kwargs,
-                getattr(_cfg, "max_args_length", 2048),
-                _cfg.effective_sensitive_keys() if _cfg else (),
-                getattr(_cfg, "mask_placeholder", "***") if _cfg else "***",
-            ) if log_args else ""
-            s = step or fn_name
-            if log_args:
-                log_business_event(loggr, logging.DEBUG, f"{fn_name} in", step=s, status="start", extra={"args": args_s})
+            # P0 fix: 用 token/reset 确保嵌套 @log_call 时外层 span_id 正确恢复
+            _token_span = _span_id.set(_new_span_id())
             try:
-                result = await func(*args, **kwargs)
-            except Exception as e:
+                args_s = _serialize_args(
+                    args, kwargs,
+                    getattr(_cfg, "max_args_length", 2048),
+                    _cfg.effective_sensitive_keys() if _cfg else (),
+                    getattr(_cfg, "mask_placeholder", "***") if _cfg else "***",
+                ) if log_args else ""
+                s = step or fn_name
+                if log_args:
+                    log_business_event(loggr, logging.DEBUG, f"{fn_name} in", step=s, status="start", extra={"args": args_s})
+                try:
+                    result = await func(*args, **kwargs)
+                except Exception as e:
+                    cost = (time.perf_counter() - started) * 1000
+                    log_business_event(
+                        loggr, logging.ERROR,
+                        f"{fn_name} failed: {type(e).__name__}: {e}",
+                        step=s, status="failed",
+                        error_code=getattr(e, "code", None) or type(e).__name__,
+                        error_msg=str(e),
+                        extra={"cost_ms": round(cost, 3), "exception_type": type(e).__name__,
+                               "stack_trace": traceback.format_exc()[:4000]},
+                    )
+                    raise
                 cost = (time.perf_counter() - started) * 1000
+                extra = {"cost_ms": round(cost, 3)}
+                if log_result:
+                    extra["result"] = repr(mask_value(result, 512))
                 log_business_event(
-                    loggr, logging.ERROR,
-                    f"{fn_name} failed: {type(e).__name__}: {e}",
-                    step=s, status="failed",
-                    error_code=getattr(e, "code", None) or type(e).__name__,
-                    error_msg=str(e),
-                    extra={"cost_ms": round(cost, 3), "exception_type": type(e).__name__,
-                           "stack_trace": traceback.format_exc()[:4000]},
+                    loggr, level, f"{fn_name} out", step=s, status="success", extra=extra,
                 )
-                raise
-            cost = (time.perf_counter() - started) * 1000
-            extra = {"cost_ms": round(cost, 3)}
-            if log_result:
-                extra["result"] = repr(mask_value(result, 512))
-            log_business_event(
-                loggr, level, f"{fn_name} out", step=s, status="success", extra=extra,
-            )
-            return result
+                return result
+            finally:
+                _span_id.reset(_token_span)
 
         return async_wrapper if is_async else sync_wrapper
 

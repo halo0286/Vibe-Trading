@@ -61,24 +61,105 @@ def mask(text: str, sensitive_keys: Iterable[str], placeholder: str = "***") -> 
 
 
 def _mask_kv(text: str, key: str, placeholder: str, sep: str) -> str:
-    import re
+    """P0 fix: 用非正则的逐字符扫描替代原正则，消除 ReDoS 风险。
 
-    # 匹配 key（可选引号）= 值（直到空格/逗号/换行/右括号）
-    pattern = re.compile(
-        r'(?i)(["\']?' + re.escape(key) + r'["\']?\s*' + re.escape(sep)
-        + r'\s*)([^,\s\}\];]+)'
-    )
-    return pattern.sub(lambda m: m.group(1) + placeholder, text)
+    原正则 (["\']?key["\']?\\s*=\\s*)([^,\\s\\}\\];]+) 中 \\s* 与 [^,\\s...]+
+    的组合在恶意输入下可导致指数级回溯。改为线性扫描：找到 key+sep 后，
+    从 sep 之后第一个非空白字符开始，到下一个分隔符为止即为值。
+    """
+    key_lower = key.lower()
+    result = []
+    i = 0
+    n = len(text)
+    while i < n:
+        # 尝试在位置 i 匹配 key（大小写不敏感，允许前后引号）
+        j = i
+        # 跳过可选前引号
+        if j < n and text[j] in ('"', "'"):
+            j += 1
+        # 匹配 key
+        if j + len(key) <= n and text[j:j + len(key)].lower() == key_lower:
+            j += len(key)
+            # 跳过可选后引号
+            if j < n and text[j] in ('"', "'"):
+                j += 1
+            # 跳过空白
+            while j < n and text[j] in (' ', '\t'):
+                j += 1
+            # 匹配 sep
+            if j < n and text[j:j + len(sep)] == sep:
+                j += len(sep)
+                # 跳过 sep 后空白
+                while j < n and text[j] in (' ', '\t'):
+                    j += 1
+                # 保留 key+sep 部分
+                result.append(text[i:j])
+                # 扫描值：到分隔符为止
+                v_start = j
+                while j < n and text[j] not in (',', ' ', '\t', '}', ']', ';', '\n', '\r'):
+                    j += 1
+                result.append(placeholder)
+                i = j
+                continue
+        result.append(text[i])
+        i += 1
+    return ''.join(result)
 
 
 def _mask_json(text: str, key: str, placeholder: str) -> str:
-    import re
+    """P0 fix: 用非正则的逐字符扫描替代原正则，消除 ReDoS 风险。
 
-    # 匹配 "key": "value" 或 "key": value
-    pattern = re.compile(
-        r'(?i)("?' + re.escape(key) + r'"?\s*:\s*)("[^"]*"|[^,}\]]+)'
-    )
-    return pattern.sub(lambda m: m.group(1) + placeholder, text)
+    匹配 "key": "value" 或 "key": value 形态。
+    """
+    key_lower = key.lower()
+    result = []
+    i = 0
+    n = len(text)
+    while i < n:
+        # 尝试匹配 "key" 或 key
+        j = i
+        has_quote = False
+        if j < n and text[j] == '"':
+            has_quote = True
+            j += 1
+        if j + len(key) <= n and text[j:j + len(key)].lower() == key_lower:
+            j += len(key)
+            if has_quote and j < n and text[j] == '"':
+                j += 1
+            # 跳过空白
+            while j < n and text[j] in (' ', '\t'):
+                j += 1
+            # 匹配冒号
+            if j < n and text[j] == ':':
+                j += 1
+                # 跳过冒号后空白
+                while j < n and text[j] in (' ', '\t'):
+                    j += 1
+                # 保留 key: 部分
+                result.append(text[i:j])
+                # 值：引号字符串或非引号到分隔符
+                if j < n and text[j] == '"':
+                    # 引号字符串：找到闭合引号（处理转义）
+                    j += 1
+                    while j < n:
+                        if text[j] == '\\' and j + 1 < n:
+                            j += 2
+                        elif text[j] == '"':
+                            j += 1
+                            break
+                        else:
+                            j += 1
+                    result.append(placeholder)
+                else:
+                    # 非引号值：到 , } ] 为止
+                    while j < n and text[j] not in (',', '}', ']', '\n', '\r'):
+                        j += 1
+                    result.append(placeholder)
+                i = j
+                continue
+        result.append(text[i])
+        i += 1
+    return ''.join(result)
 
 
 class MaskFilter(logging.Filter):
