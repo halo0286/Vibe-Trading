@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from backtest.engines.partial_fill import PartialFillSchedule
+from backtest.engines.partial_fill import PartialFillSchedule, build_partial_fill_schedule
 
 
 # ── Construction ────────────────────────────────────────────────────────
@@ -225,3 +225,139 @@ class TestFactories:
         assert sched.direction == -1
         # Sold at 9.8 vs ref 10.0 → shortfall = (9.8-10.0)*(-1)*200 = 40
         assert sched.implementation_shortfall == pytest.approx(40.0)
+
+
+# ── build_partial_fill_schedule (T2) ───────────────────────────────────
+
+
+class TestBuildSchedule:
+    """Tests for the core scheduling algorithm."""
+
+    def test_basic_sqrt_schedule(self):
+        sched = build_partial_fill_schedule(
+            total_shares=1000, price=100.0, adv_per_bar=5000,
+            direction=1, max_participation=0.1, max_bars=5,
+            impact_model="sqrt", volatility=0.02,
+        )
+        # max per bar = 5000 * 0.1 = 500; need 1000 → 2 bars
+        assert sched.n_bars == 2
+        assert sched.filled_shares == pytest.approx(1000.0)
+        assert sched.unfilled_shares == pytest.approx(0.0)
+        assert sched.fill_ratio == pytest.approx(1.0)
+        sched.validate()
+
+    def test_unfilled_when_max_bars_insufficient(self):
+        sched = build_partial_fill_schedule(
+            total_shares=3000, price=100.0, adv_per_bar=5000,
+            direction=1, max_participation=0.1, max_bars=3,
+            impact_model="sqrt", volatility=0.02,
+        )
+        # max per bar = 500; 3 bars = 1500; unfilled = 1500
+        assert sched.n_bars == 3
+        assert sched.filled_shares == pytest.approx(1500.0)
+        assert sched.unfilled_shares == pytest.approx(1500.0)
+        assert sched.fill_ratio == pytest.approx(0.5)
+        sched.validate()
+
+    def test_zero_adv_returns_empty(self):
+        sched = build_partial_fill_schedule(
+            total_shares=1000, price=100.0, adv_per_bar=0,
+            direction=1, impact_model="sqrt", volatility=0.02,
+        )
+        assert sched.n_bars == 0
+        assert sched.filled_shares == 0.0
+        assert sched.unfilled_shares == 1000.0
+        sched.validate()
+
+    def test_small_order_single_bar(self):
+        sched = build_partial_fill_schedule(
+            total_shares=100, price=50.0, adv_per_bar=10000,
+            direction=-1, max_participation=0.1, max_bars=5,
+            impact_model="sqrt", volatility=0.01,
+        )
+        # 100 < 1000 → single bar
+        assert sched.n_bars == 1
+        assert sched.filled_shares == pytest.approx(100.0)
+        assert sched.unfilled_shares == pytest.approx(0.0)
+        sched.validate()
+
+    def test_linear_impact_model(self):
+        sched = build_partial_fill_schedule(
+            total_shares=500, price=100.0, adv_per_bar=5000,
+            direction=1, max_participation=0.1, max_bars=3,
+            impact_model="linear", impact_coefficient=0.1,
+        )
+        assert sched.n_bars == 1  # 500 < 500*0.1=500... exactly 1 bar
+        assert sched.filled_shares == pytest.approx(500.0)
+        sched.validate()
+
+    def test_fixed_impact_model(self):
+        sched = build_partial_fill_schedule(
+            total_shares=200, price=100.0, adv_per_bar=5000,
+            direction=1, max_participation=0.1, max_bars=3,
+            impact_model="fixed", slippage_bps=10.0,
+        )
+        assert sched.n_bars == 1
+        # Fixed slippage: 10 bps = 0.001 → price = 100 + 0.1 = 100.1
+        assert sched.fill_prices[0] == pytest.approx(100.1, rel=1e-3)
+        sched.validate()
+
+    def test_buy_price_above_reference(self):
+        sched = build_partial_fill_schedule(
+            total_shares=1000, price=100.0, adv_per_bar=5000,
+            direction=1, impact_model="sqrt", volatility=0.02,
+        )
+        assert sched.avg_fill_price > 100.0  # buying pushes price up
+
+    def test_sell_price_below_reference(self):
+        sched = build_partial_fill_schedule(
+            total_shares=1000, price=100.0, adv_per_bar=5000,
+            direction=-1, impact_model="sqrt", volatility=0.02,
+        )
+        assert sched.avg_fill_price < 100.0  # selling pushes price down
+
+    def test_implementation_shortfall_positive(self):
+        sched = build_partial_fill_schedule(
+            total_shares=1000, price=100.0, adv_per_bar=5000,
+            direction=1, impact_model="sqrt", volatility=0.02,
+        )
+        assert sched.implementation_shortfall > 0
+
+    # ── Validation errors ───────────────────────────────────────────────
+
+    def test_zero_shares_raises(self):
+        with pytest.raises(ValueError, match="total_shares"):
+            build_partial_fill_schedule(0, 100.0, 5000, 1,
+                                        impact_model="sqrt", volatility=0.02)
+
+    def test_negative_price_raises(self):
+        with pytest.raises(ValueError, match="price"):
+            build_partial_fill_schedule(100, -1.0, 5000, 1,
+                                        impact_model="sqrt", volatility=0.02)
+
+    def test_invalid_direction_raises(self):
+        with pytest.raises(ValueError, match="direction"):
+            build_partial_fill_schedule(100, 100.0, 5000, 0,
+                                        impact_model="sqrt", volatility=0.02)
+
+    def test_invalid_participation_raises(self):
+        with pytest.raises(ValueError, match="max_participation"):
+            build_partial_fill_schedule(100, 100.0, 5000, 1,
+                                        max_participation=0,
+                                        impact_model="sqrt", volatility=0.02)
+
+    def test_zero_max_bars_raises(self):
+        with pytest.raises(ValueError, match="max_bars"):
+            build_partial_fill_schedule(100, 100.0, 5000, 1,
+                                        max_bars=0,
+                                        impact_model="sqrt", volatility=0.02)
+
+    def test_unknown_impact_model_raises(self):
+        with pytest.raises(ValueError, match="unknown impact_model"):
+            build_partial_fill_schedule(100, 100.0, 5000, 1,
+                                        impact_model="cubic")
+
+    def test_sqrt_without_volatility_raises(self):
+        with pytest.raises(ValueError, match="volatility"):
+            build_partial_fill_schedule(100, 100.0, 5000, 1,
+                                        impact_model="sqrt", volatility=None)

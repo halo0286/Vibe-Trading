@@ -197,4 +197,131 @@ class PartialFillSchedule:
         )
 
 
-__all__ = ["PartialFillSchedule"]
+def build_partial_fill_schedule(
+    total_shares: float,
+    price: float,
+    adv_per_bar: float,
+    direction: int,
+    *,
+    max_participation: float = 0.1,
+    max_bars: int = 5,
+    impact_model: str = "sqrt",
+    volatility: float | None = None,
+    impact_coefficient: float = 0.5,
+    slippage_bps: float = 5.0,
+) -> PartialFillSchedule:
+    """Build a multi-bar partial-fill schedule under participation-rate constraint.
+
+    Each bar fills at most ``adv_per_bar × max_participation`` shares.  The fill
+    price includes both fixed slippage and size-dependent market impact computed
+    by the chosen model from :mod:`src.quantlib.impact`.
+
+    Parameters
+    ----------
+    total_shares : float
+        Absolute number of shares to trade (always positive).
+    price : float
+        Decision-time reference price (before impact).
+    adv_per_bar : float
+        Average daily volume in shares for the relevant period.
+    direction : int
+        +1 for buy, −1 for sell.
+    max_participation : float
+        Maximum fraction of ADV that can be traded per bar (default 10%).
+    max_bars : int
+        Maximum number of bars to spread the order across (default 5).
+    impact_model : str
+        One of ``"sqrt"``, ``"linear"``, ``"fixed"`` (default ``"sqrt"``).
+    volatility : float or None
+        Daily return volatility (required for ``"sqrt"`` model).
+    impact_coefficient : float
+        Coefficient for ``"sqrt"`` (eta) or ``"linear"`` model.
+    slippage_bps : float
+        Fixed half-spread slippage in basis points, applied on every bar.
+
+    Returns
+    -------
+    PartialFillSchedule
+        Immutable schedule with per-bar fills, prices, and unfilled remainder.
+
+    Raises
+    ------
+    ValueError
+        If ``total_shares <= 0``, ``price <= 0``, ``adv_per_bar < 0``,
+        ``direction`` not in {+1, −1}, ``max_participation`` not in (0, 1],
+        ``max_bars < 1``, unknown ``impact_model``, or ``"sqrt"`` without
+        ``volatility``.
+    """
+    # ── Input validation ────────────────────────────────────────────────
+    if total_shares <= 0:
+        raise ValueError(f"total_shares must be > 0, got {total_shares}")
+    if price <= 0:
+        raise ValueError(f"price must be > 0, got {price}")
+    if adv_per_bar < 0:
+        raise ValueError(f"adv_per_bar must be >= 0, got {adv_per_bar}")
+    if direction not in (1, -1):
+        raise ValueError(f"direction must be +1 or -1, got {direction}")
+    if not (0 < max_participation <= 1):
+        raise ValueError(f"max_participation must be in (0, 1], got {max_participation}")
+    if max_bars < 1:
+        raise ValueError(f"max_bars must be >= 1, got {max_bars}")
+    if impact_model not in ("sqrt", "linear", "fixed"):
+        raise ValueError(f"unknown impact_model {impact_model!r}")
+    if impact_model == "sqrt" and (volatility is None or volatility < 0):
+        raise ValueError("sqrt impact requires non-negative volatility")
+
+    # ── Edge cases ──────────────────────────────────────────────────────
+    if adv_per_bar == 0:
+        # No liquidity → nothing can be filled
+        return PartialFillSchedule.empty(total_shares, direction, price)
+
+    # ── Build schedule ──────────────────────────────────────────────────
+    from src.quantlib.impact import fixed_slippage, linear_impact, sqrt_impact
+
+    max_shares_per_bar = adv_per_bar * max_participation
+    remaining = abs(total_shares)
+    fills: list[float] = []
+    prices: list[float] = []
+    cumulative_filled = 0.0
+
+    for _ in range(max_bars):
+        if remaining <= 1e-12:
+            break
+        bar_fill = min(remaining, max_shares_per_bar)
+
+        # Compute fill price with impact
+        if impact_model == "sqrt":
+            fill_price = sqrt_impact(
+                price, direction, cumulative_filled + bar_fill,
+                adv_per_bar, volatility, eta=impact_coefficient,
+            )
+        elif impact_model == "linear":
+            fill_price = linear_impact(
+                price, direction, cumulative_filled + bar_fill,
+                adv_per_bar, impact_coeff=impact_coefficient,
+            )
+        else:  # fixed
+            fill_price = fixed_slippage(price, direction, bps=slippage_bps)
+
+        # Add fixed slippage on top of size-dependent impact (except for
+        # "fixed" model which already includes it)
+        if impact_model != "fixed":
+            slip = price * slippage_bps / 10_000.0
+            fill_price += direction * slip
+
+        fills.append(bar_fill)
+        prices.append(float(fill_price))
+        cumulative_filled += bar_fill
+        remaining -= bar_fill
+
+    return PartialFillSchedule(
+        total_shares=abs(total_shares),
+        fill_schedule=np.array(fills, dtype=np.float64),
+        fill_prices=np.array(prices, dtype=np.float64),
+        unfilled_shares=max(remaining, 0.0),
+        direction=direction,
+        reference_price=price,
+    )
+
+
+__all__ = ["PartialFillSchedule", "build_partial_fill_schedule"]
