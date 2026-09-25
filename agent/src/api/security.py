@@ -296,6 +296,32 @@ def install_access_log_redaction_filter() -> None:
         target.addFilter(_AccessLogRedactionFilter())
 
 
+def bridge_uvicorn_to_logsystem() -> None:
+    """S-11: Route uvicorn access logs through logsystem's file handler.
+
+    Adds logsystem's rotating file handler to uvicorn.access logger so API
+    request logs get the same {pid}_{date}_{seq}.log rotation, structured
+    kv/json format, and masking as application logs. Idempotent.
+    """
+    try:
+        from src.logsystem.logger import _configured
+    except Exception:
+        return  # logsystem not initialized; skip silently
+
+    if _configured is None:
+        return
+
+    access_logger = logging.getLogger("uvicorn.access")
+    file_handler = _configured.file_handler
+    # Avoid adding duplicate handlers
+    if file_handler not in access_logger.handlers:
+        access_logger.addHandler(file_handler)
+        # Also apply logsystem's masking filter to access logs
+        for f in file_handler.filters:
+            if f not in access_logger.filters:
+                access_logger.addFilter(f)
+
+
 # ============================================================================
 # SSE tickets (short-lived, single-use browser EventSource credentials)
 # ============================================================================

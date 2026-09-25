@@ -127,6 +127,7 @@ from src.api.scheduled_routes import (  # noqa: E402
 async def _run_startup_preflight() -> None:
     """Run preflight checks on server startup."""
     init_logging()  # task2 logsystem（幂等）
+    from src.api.security import bridge_uvicorn_to_logsystem; bridge_uvicorn_to_logsystem()  # S-11
     from src.preflight import run_preflight
 
     from src.config import migrate as _migrate
@@ -381,9 +382,7 @@ def serve_main(argv: list[str] | None = None) -> int:
     print(f"  http://127.0.0.1:{args.port}")
     print("=" * 50)
 
-    # Redact api_key=/ticket= values from Uvicorn's access log (it logs the full
-    # request line including the query string). Installed before run() so the
-    # filter is attached when Uvicorn configures its loggers.
+    # Redact api_key=/ticket= from Uvicorn access log; installed before run().
     install_access_log_redaction_filter()
 
     try:

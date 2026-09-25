@@ -182,6 +182,9 @@ _configured: Optional["GlobalLogger"] = None
 _lock = threading.Lock()
 
 
+import random as _random  # P-2 fix: top-level import instead of per-call
+
+
 class _RateLimiter:
     """按 (定位信息) 维度做高频日志限流：窗口内超过阈值则按采样率抽样/丢弃。
 
@@ -189,10 +192,14 @@ class _RateLimiter:
     与 pid 隔离的文件名一致，天然按进程隔离。
     """
 
+    # P-2: compact buckets when total entries exceed this threshold
+    _COMPACT_THRESHOLD = 10000
+
     def __init__(self, config: LogConfig) -> None:
         self.config = config
         self._buckets: Dict[Any, list] = {}
         self._lock = threading.Lock()
+        self._total_entries: int = 0
 
     def allow(self, key: Any) -> bool:
         cfg = self.config
@@ -204,14 +211,31 @@ class _RateLimiter:
             self._buckets[key] = bucket
             if len(bucket) >= cfg.rate_limit_max:
                 # 超出阈值：按采样率放行
-                import random
-
-                if random.random() < cfg.sample_rate:
+                if _random.random() < cfg.sample_rate:
                     bucket.append(now)
                     return True
                 return False
             bucket.append(now)
+            self._total_entries += 1
+            # P-2: periodic compact to prevent unbounded memory growth
+            if self._total_entries >= self._COMPACT_THRESHOLD:
+                self._compact(now, cfg.rate_limit_window_seconds)
             return True
+
+    def _compact(self, now: float, window: float) -> None:
+        """Remove expired entries from all buckets to reclaim memory."""
+        new_total = 0
+        empty_keys = []
+        for k, bucket in self._buckets.items():
+            fresh = [t for t in bucket if now - t < window]
+            if fresh:
+                self._buckets[k] = fresh
+                new_total += len(fresh)
+            else:
+                empty_keys.append(k)
+        for k in empty_keys:
+            del self._buckets[k]
+        self._total_entries = new_total
 
 
 class GlobalLogger:

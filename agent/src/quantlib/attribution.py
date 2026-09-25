@@ -374,9 +374,13 @@ def carino_link(periods: Sequence[BrinsonResult]) -> LinkedAttribution:
     total_benchmark_return = benchmark_wealth - 1.0
     total_factor = carino_factor(total_portfolio_return, total_benchmark_return)
 
-    scaling_factors = tuple(
-        carino_factor(period.portfolio_return, period.benchmark_return) / total_factor for period in periods
-    )
+    # A-6 fix: guard against division by zero when portfolio == benchmark
+    if total_factor == 0:
+        scaling_factors = tuple(1.0 / len(periods) for _ in periods) if periods else ()
+    else:
+        scaling_factors = tuple(
+            carino_factor(period.portfolio_return, period.benchmark_return) / total_factor for period in periods
+        )
 
     order: list[str] = []
     scaled: dict[str, list[float]] = {}

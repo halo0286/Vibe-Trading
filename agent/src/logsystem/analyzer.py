@@ -58,9 +58,26 @@ class LogAnalyzer:
             pass
         return v
 
-    def _read_fields(self, business_id: Optional[str], trace_id: Optional[str]) -> List[Dict[str, Any]]:
+    # P-3 fix: pre-filter log files by pid/date from filename before reading.
+    # Filename format: {pid}_{YYYY-MM-DD}_{seq}.log
+    _LOG_FILENAME_RE = re.compile(r"^(\d+)_(\d{4}-\d{2}-\d{2})_(\d+)\.log$")
+
+    def _read_fields(
+        self,
+        business_id: Optional[str],
+        trace_id: Optional[str],
+        pid_filter: Optional[int] = None,
+        date_filter: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
         for f in sorted(self.log_dir.glob("*.log")):
+            # P-3: skip files that don't match pid/date filter
+            m = self._LOG_FILENAME_RE.match(f.name)
+            if m:
+                if pid_filter is not None and int(m.group(1)) != pid_filter:
+                    continue
+                if date_filter is not None and m.group(2) != date_filter:
+                    continue
             try:
                 with open(f, encoding="utf-8") as fh:
                     for line in fh:
@@ -79,8 +96,14 @@ class LogAnalyzer:
                 continue
         return rows
 
-    def analyze(self, business_id: Optional[str] = None, trace_id: Optional[str] = None) -> Dict[str, Any]:
-        rows = self._read_fields(business_id, trace_id)
+    def analyze(
+        self,
+        business_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        pid_filter: Optional[int] = None,
+        date_filter: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        rows = self._read_fields(business_id, trace_id, pid_filter, date_filter)
 
         total = len(rows)
         if total == 0:
