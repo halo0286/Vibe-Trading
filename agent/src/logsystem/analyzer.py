@@ -12,7 +12,7 @@ import logging
 import re
 import threading
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -150,7 +150,8 @@ class LogAnalyzer:
             "slow_steps": slow_steps[:20],
             "high_freq_logs": high_freq,
             "suggestions": suggestions,
-            "analyzed_at": datetime.utcnow().isoformat() + "Z",
+            # D-8 fix: utcnow() deprecated in 3.12+; use timezone-aware now()
+            "analyzed_at": datetime.now(tz=timezone.utc).isoformat(),
         }
         return report
 
@@ -171,14 +172,17 @@ def run_analysis(
     """
     analyzer = LogAnalyzer(log_dir, file_format)
     report = analyzer.analyze(business_id=business_id, trace_id=trace_id)
-    # 写回日志（自闭环）
+    # D-3 fix: wrap analysis log in trace_scope so it carries business_id
+    from .trace import trace_scope
+
     logger = get_logger()
-    log_business_event(
-        logger, logging.INFO,
-        f"[analysis] {report['summary']}",
-        step="auto_analysis", status=report["status"],
-        extra={"analysis_report": json.dumps(report, ensure_ascii=False)},
-    )
+    with trace_scope(business_id=business_id, trace_id=trace_id):
+        log_business_event(
+            logger, logging.INFO,
+            f"[analysis] {report['summary']}",
+            step="auto_analysis", status=report["status"],
+            extra={"analysis_report": json.dumps(report, ensure_ascii=False)},
+        )
     if report_path:
         Path(report_path).parent.mkdir(parents=True, exist_ok=True)
         Path(report_path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

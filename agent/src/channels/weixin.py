@@ -381,7 +381,7 @@ class WeixinChannel(BaseChannel):
                         )
                         return True
                     else:
-                        self.logger.error("Login confirmed but no bot_token in response")
+                        self.logger.debug("Login confirmed but no bot_token in response")
                         return False
                 elif status == "scaned_but_redirect":
                     redirect_host = str(status_data.get("redirect_host", "") or "").strip()

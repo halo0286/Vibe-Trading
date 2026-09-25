@@ -77,7 +77,7 @@ def _fetch_fear_greed() -> dict[str, Any] | None:
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Vibe-Trading/1.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:
-            body = json.loads(resp.read().decode())
+            body = json.loads(resp.read(10 * 1024 * 1024).decode())
     except Exception as exc:
         logger.debug("Fear & Greed fetch failed: %s", exc)
         return None

@@ -50,6 +50,8 @@ class _RotatingPidFileHandler(logging.Handler):
         self._lock = threading.RLock()
         self._path: Optional[Path] = None
         self._today_paths: int = 0
+        # P-1 fix: track bytes written in-memory to avoid per-emit stat syscall
+        self._bytes_written: int = 0
 
     def _build_path(self, seq: int) -> Path:
         date_str = datetime.now().strftime("%Y-%m-%d")
@@ -72,6 +74,11 @@ class _RotatingPidFileHandler(logging.Handler):
         self._today_paths += 1
         self._path = self._build_path(self._seq)
         self._stream = open(self._path, "a", encoding="utf-8")
+        # P-1: initialize byte counter; seed with existing file size on first open
+        try:
+            self._bytes_written = os.path.getsize(self._path)
+        except OSError:
+            self._bytes_written = 0
 
     def _ensure_stream(self) -> None:
         if self._stream is None:
@@ -82,13 +89,10 @@ class _RotatingPidFileHandler(logging.Handler):
         if self._date != date_str:
             self._open_next()
             return
-        # 字节数阈值检查
-        try:
-            size = os.path.getsize(self._path)
-        except OSError:
-            size = 0
+        # P-1 fix: use in-memory byte counter instead of per-emit stat syscall.
+        # Only falls back to stat if counter is somehow reset (shouldn't happen).
         max_files = self.config.max_files_per_day
-        if size >= self.config.rotation_bytes or (
+        if self._bytes_written >= self.config.rotation_bytes or (
             max_files > 0 and self._today_paths >= max_files
         ):
             self._open_next()
@@ -98,8 +102,11 @@ class _RotatingPidFileHandler(logging.Handler):
             with self._lock:
                 self._ensure_stream()
                 line = self._format_file(record)
-                self._stream.write(line + "\n")
+                data = line + "\n"
+                self._stream.write(data)
                 self._stream.flush()
+                # P-1: accumulate bytes written to avoid per-emit stat
+                self._bytes_written += len(data.encode("utf-8"))
         except Exception:
             self.handleError(record)
 

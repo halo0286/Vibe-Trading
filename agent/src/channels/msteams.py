@@ -176,7 +176,7 @@ class MSTeamsChannel(BaseChannel):
             return
 
         if not self.config.app_id or not self.config.app_password:
-            self.logger.error("app_id/app_password not configured")
+            self.logger.debug("app_id/app_password not configured")
             return
 
         if not self.config.validate_inbound_auth:

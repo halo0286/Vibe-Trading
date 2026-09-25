@@ -510,7 +510,7 @@ class TelegramChannel(BaseChannel):
     async def start(self) -> None:
         """Start the Telegram bot."""
         if not self.config.token:
-            self.logger.error("bot token not configured")
+            self.logger.debug("bot token not configured")
             return
 
         self._running = True

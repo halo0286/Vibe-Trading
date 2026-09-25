@@ -310,13 +310,13 @@ class MatrixChannel(BaseChannel):
                     create_new_session = False
                 except Exception as e:
                     self.logger.warning("Failed to load from existing session: %s", e)
-                    self.logger.info("Falling back to password login...")
+                    self.logger.debug("Falling back to password login...")
 
             if create_new_session:
-                self.logger.info("Using password login...")
+                self.logger.debug("Using password login...")
                 resp = await self.client.login(self.config.password)
                 if isinstance(resp, LoginResponse):
-                    self.logger.info("Logged in using a password; saving details to disk")
+                    self.logger.debug("Logged in using a password; saving details to disk")
                     self._write_session_to_disk(resp)
                 else:
                     self.logger.error("Failed to log in: %s", resp)

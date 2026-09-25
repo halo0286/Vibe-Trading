@@ -412,7 +412,7 @@ class DiscordChannel(BaseChannel):
             return
 
         if not self.config.token:
-            self.logger.error("bot token not configured")
+            self.logger.debug("bot token not configured")
             return
 
         try:

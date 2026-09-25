@@ -302,7 +302,7 @@ class MochatChannel(BaseChannel):
     async def start(self) -> None:
         """Start Mochat channel workers and websocket connection."""
         if not self.config.claw_token:
-            self.logger.error("claw_token not configured")
+            self.logger.debug("claw_token not configured")
             return
 
         self._running = True

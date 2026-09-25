@@ -223,7 +223,7 @@ class DingTalkChannel(BaseChannel):
                 return
 
             if not self.config.client_id or not self.config.client_secret:
-                self.logger.error("client_id and client_secret not configured")
+                self.logger.debug("client_id and client_secret not configured")
                 return
 
             self._running = True

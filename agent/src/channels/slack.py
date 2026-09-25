@@ -97,7 +97,7 @@ class SlackChannel(BaseChannel):
     async def start(self) -> None:
         """Start the Slack Socket Mode client."""
         if not self.config.bot_token or not self.config.app_token:
-            self.logger.error("bot/app token not configured")
+            self.logger.debug("bot/app token not configured")
             return
         if self.config.mode != "socket":
             self.logger.error("Unsupported mode: %s", self.config.mode)

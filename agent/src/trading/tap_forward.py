@@ -197,9 +197,9 @@ def _http(method: str, url: str, headers: dict[str, str], data: bytes | None, ti
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, resp.read().decode("utf-8", "replace")
+            return resp.status, resp.read(10 * 1024 * 1024).decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read().decode("utf-8", "replace")
+        return exc.code, exc.read(10 * 1024 * 1024).decode("utf-8", "replace")
     except urllib.error.URLError as exc:
         return 0, json.dumps({"error": f"connection failed: {exc.reason}"})
 

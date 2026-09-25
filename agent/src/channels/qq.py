@@ -209,7 +209,7 @@ class QQChannel(BaseChannel):
             return
 
         if not self.config.app_id or not self.config.secret:
-            self.logger.error("app_id and secret not configured")
+            self.logger.debug("app_id and secret not configured")
             return
 
         try:

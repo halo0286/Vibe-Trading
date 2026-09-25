@@ -106,7 +106,7 @@ class WecomChannel(BaseChannel):
             return
 
         if not self.config.bot_id or not self.config.secret:
-            self.logger.error("bot_id and secret not configured")
+            self.logger.debug("bot_id and secret not configured")
             return
 
         from wecom_aibot_sdk import WSClient, generate_req_id
