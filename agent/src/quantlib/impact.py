@@ -335,6 +335,116 @@ def decomposed_impact(
     return (temporary, permanent)
 
 
+def estimate_book_depth(
+    high: float,
+    low: float,
+    volume: float,
+    tick_size: float,
+) -> float:
+    """Estimate effective order-book depth from OHLCV bar data (T5).
+
+    Uses the intraday price range as a proxy for the number of price levels
+    touched, and divides volume by that count to get an average per-level
+    depth.  This is a *rough* proxy — real L2 data is always preferred — but
+    it captures the key intuition that a wide-range, low-volume bar implies
+    thin books while a narrow-range, high-volume bar implies thick books.
+
+    Parameters
+    ----------
+    high : float
+        Bar high price, strictly positive.
+    low : float
+        Bar low price, non-negative, ≤ high.
+    volume : float
+        Bar volume in shares, non-negative.
+    tick_size : float
+        Minimum price increment (e.g. 0.01 for A-shares, 0.01 for US equities),
+        strictly positive.
+
+    Returns
+    -------
+    float
+        Estimated shares per price level.  Returns ``inf`` when the range is
+        zero (single-price bar → effectively infinite depth at that level) or
+        when tick_size is zero.
+
+    Raises
+    ------
+    ValueError
+        If any input is negative, high < low, or tick_size ≤ 0.
+    """
+    if high < 0 or low < 0 or volume < 0:
+        raise ValueError("high, low, volume must be non-negative")
+    if high < low:
+        raise ValueError(f"high ({high}) must be >= low ({low})")
+    if tick_size <= 0:
+        raise ValueError(f"tick_size must be > 0, got {tick_size}")
+
+    price_range = high - low
+    if price_range < tick_size:
+        # Single-tick or flat bar → treat as infinite depth
+        return float("inf")
+
+    n_levels = max(price_range / tick_size, 1.0)
+    return volume / n_levels
+
+
+def dynamic_slippage(
+    order_size: float,
+    estimated_depth: float,
+    spread_bps: float,
+    price: float,
+) -> float:
+    """Compute slippage that adapts to estimated book depth (T5).
+
+    Small orders (below one level of depth) pay roughly half the spread.
+    Larger orders pay the full spread plus a depth-relative impact term.
+
+    Parameters
+    ----------
+    order_size : float
+        Absolute order size in shares, non-negative.
+    estimated_depth : float
+        Shares per price level from :func:`estimate_book_depth`.  May be
+        ``inf`` for flat bars.
+    spread_bps : float
+        Bid-ask spread in basis points, non-negative.
+    price : float
+        Reference price, strictly positive.
+
+    Returns
+    -------
+    float
+        Slippage in price units (always ≥ 0).
+
+    Raises
+    ------
+    ValueError
+        If inputs violate constraints.
+    """
+    if order_size < 0:
+        raise ValueError(f"order_size must be >= 0, got {order_size}")
+    if spread_bps < 0:
+        raise ValueError(f"spread_bps must be >= 0, got {spread_bps}")
+    if price <= 0:
+        raise ValueError(f"price must be > 0, got {price}")
+
+    half_spread = price * spread_bps / _BPS_PER_UNIT / 2.0
+
+    if not np.isfinite(estimated_depth) or estimated_depth <= 0:
+        # Infinite or unknown depth → just charge half spread
+        return half_spread
+
+    if order_size <= estimated_depth:
+        # Small order: fits within one level → half spread
+        return half_spread
+
+    # Large order: full spread + sqrt of depth-relative size
+    depth_ratio = order_size / estimated_depth
+    extra = price * spread_bps / _BPS_PER_UNIT * 0.5 * np.sqrt(depth_ratio - 1.0)
+    return half_spread + float(extra)
+
+
 __all__ = [
     "DEFAULT_DELAY_BARS",
     "DEFAULT_LINEAR_IMPACT_COEFF",
@@ -342,6 +452,8 @@ __all__ = [
     "DEFAULT_SQRT_IMPACT_ETA",
     "decomposed_impact",
     "delayed_execution",
+    "dynamic_slippage",
+    "estimate_book_depth",
     "fixed_slippage",
     "linear_impact",
     "sqrt_impact",

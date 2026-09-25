@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import numpy as np
 
 import pandas as pd
 import pytest
@@ -18,6 +19,8 @@ from src.quantlib.impact import (
     DEFAULT_SLIPPAGE_BPS,
     DEFAULT_SQRT_IMPACT_ETA,
     decomposed_impact,
+    dynamic_slippage,
+    estimate_book_depth,
     delayed_execution,
     fixed_slippage,
     linear_impact,
@@ -335,3 +338,84 @@ class TestDecomposedImpact:
         t1, p1 = decomposed_impact(PRICE, 1, 50_000, ADV, VOLATILITY, eta=0.3)
         t2, p2 = decomposed_impact(PRICE, 1, 50_000, ADV, VOLATILITY, eta=0.8)
         assert t2 + p2 > t1 + p1  # higher eta → more total impact
+
+
+# ── T5: estimate_book_depth + dynamic_slippage tests ───────────────────
+
+
+class TestEstimateBookDepth:
+    def test_basic(self):
+        # Range = 100-98 = 2, tick=0.01 → 200 levels, vol=1M → 5000/level
+        depth = estimate_book_depth(100.0, 98.0, 1_000_000, 0.01)
+        assert depth == pytest.approx(5000.0)
+
+    def test_flat_bar_returns_inf(self):
+        depth = estimate_book_depth(100.0, 100.0, 500_000, 0.01)
+        assert np.isinf(depth)
+
+    def test_single_tick_range_large_depth(self):
+        depth = estimate_book_depth(100.01, 100.0, 100_000, 0.01)
+        # range == tick → 1 level → depth = volume
+        assert depth == pytest.approx(100_000.0)
+
+    def test_zero_volume(self):
+        depth = estimate_book_depth(100.0, 99.0, 0, 0.01)
+        assert depth == 0.0
+
+    def test_wide_range_thin_book(self):
+        depth = estimate_book_depth(110.0, 90.0, 10_000, 0.01)
+        # 20/0.01 = 2000 levels, 10000/2000 = 5
+        assert depth == pytest.approx(5.0)
+
+    def test_narrow_range_thick_book(self):
+        depth = estimate_book_depth(100.005, 100.0, 10_000_000, 0.01)
+        assert np.isinf(depth)  # range < tick_size
+
+    def test_invalid_high_lt_low(self):
+        with pytest.raises(ValueError):
+            estimate_book_depth(99.0, 100.0, 1000, 0.01)
+
+    def test_invalid_negative_tick(self):
+        with pytest.raises(ValueError):
+            estimate_book_depth(100.0, 99.0, 1000, -0.01)
+
+    def test_invalid_negative_volume(self):
+        with pytest.raises(ValueError):
+            estimate_book_depth(100.0, 99.0, -100, 0.01)
+
+
+class TestDynamicSlippage:
+    def test_small_order_half_spread(self):
+        slip = dynamic_slippage(100, 5000.0, 10.0, 100.0)
+        # half spread = 100 * 10/10000/2 = 0.05
+        assert slip == pytest.approx(0.05)
+
+    def test_large_order_exceeds_half_spread(self):
+        slip = dynamic_slippage(10000, 5000.0, 10.0, 100.0)
+        assert slip > 0.05  # more than half spread
+
+    def test_infinite_depth_half_spread(self):
+        slip = dynamic_slippage(100000, float("inf"), 10.0, 100.0)
+        assert slip == pytest.approx(0.05)
+
+    def test_zero_order_half_spread(self):
+        slip = dynamic_slippage(0, 5000.0, 10.0, 100.0)
+        assert slip == pytest.approx(0.05)
+
+    def test_monotone_in_order_size(self):
+        s1 = dynamic_slippage(1000, 5000.0, 10.0, 100.0)
+        s2 = dynamic_slippage(10000, 5000.0, 10.0, 100.0)
+        assert s2 > s1
+
+    def test_wider_spread_more_slippage(self):
+        s1 = dynamic_slippage(1000, 5000.0, 5.0, 100.0)
+        s2 = dynamic_slippage(1000, 5000.0, 20.0, 100.0)
+        assert s2 > s1
+
+    def test_invalid_negative_order(self):
+        with pytest.raises(ValueError):
+            dynamic_slippage(-1, 5000.0, 10.0, 100.0)
+
+    def test_invalid_zero_price(self):
+        with pytest.raises(ValueError):
+            dynamic_slippage(100, 5000.0, 10.0, 0.0)
