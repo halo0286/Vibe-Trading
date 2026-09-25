@@ -180,3 +180,4 @@ agent/tests/artifacts/
 logs/
 agent/src/logsystem/__pycache__/
 *.log
+verify_huichuan.py
