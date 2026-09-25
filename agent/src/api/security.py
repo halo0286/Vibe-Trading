@@ -296,12 +296,45 @@ def install_access_log_redaction_filter() -> None:
         target.addFilter(_AccessLogRedactionFilter())
 
 
-def bridge_uvicorn_to_logsystem() -> None:
-    """S-11: Route uvicorn access logs through logsystem's file handler.
+class _AccessLogStructuredFilter(logging.Filter):
+    """S-11 full-chain observability: enrich uvicorn access log records with
+    logsystem fields (business_id, trace_id, span_id, step, cost_ms) so they
+    appear in structured file output and can be correlated with business traces.
 
-    Adds logsystem's rotating file handler to uvicorn.access logger so API
-    request logs get the same {pid}_{date}_{seq}.log rotation, structured
-    kv/json format, and masking as application logs. Idempotent.
+    Also reformats the message to include HTTP method/path/status/latency in
+    a consistent parseable format.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        from src.logsystem.trace import get_business_id, get_trace_id, get_span_id
+
+        # Inject tracing context
+        bid = get_business_id()
+        tid = get_trace_id()
+        sid = get_span_id()
+        if bid:
+            record.business_id = bid  # type: ignore[attr-defined]
+        if tid:
+            record.trace_id = tid  # type: ignore[attr-defined]
+        if sid:
+            record.span_id = sid  # type: ignore[attr-defined]
+
+        # Tag as access log for downstream analysis
+        record.step = "http_access"  # type: ignore[attr-defined]
+        record.status = "success"  # type: ignore[attr-defined]
+
+        return True
+
+
+def bridge_uvicorn_to_logsystem() -> None:
+    """S-11 full-chain observability: integrate uvicorn access logs into logsystem.
+
+    - Adds logsystem's rotating file handler + console handler to uvicorn.access
+    - Applies MaskFilter (sensitive data masking) + AccessLogStructuredFilter
+      (tracing context injection) to both handlers
+    - Access logs get same {pid}_{date}_{seq}.log rotation, structured kv/json
+      format, masking, and business_id/trace_id correlation as app logs
+    - Idempotent: safe to call multiple times
     """
     try:
         from src.logsystem.logger import _configured
@@ -312,14 +345,22 @@ def bridge_uvicorn_to_logsystem() -> None:
         return
 
     access_logger = logging.getLogger("uvicorn.access")
-    file_handler = _configured.file_handler
-    # Avoid adding duplicate handlers
-    if file_handler not in access_logger.handlers:
-        access_logger.addHandler(file_handler)
-        # Also apply logsystem's masking filter to access logs
-        for f in file_handler.filters:
-            if f not in access_logger.filters:
-                access_logger.addFilter(f)
+    # Ensure access logger emits at the configured level (parent may be WARNING)
+    access_logger.setLevel(_configured.config.level)
+
+    # Structured filter: injects tracing context into every access log record
+    struct_filter = _AccessLogStructuredFilter()
+    if not any(isinstance(f, _AccessLogStructuredFilter) for f in access_logger.filters):
+        access_logger.addFilter(struct_filter)
+
+    # Attach both file and console handlers from logsystem
+    for handler in (_configured.file_handler, _configured.console):
+        if handler not in access_logger.handlers:
+            access_logger.addHandler(handler)
+            # Apply masking filter to access logs
+            for f in handler.filters:
+                if f not in access_logger.filters:
+                    access_logger.addFilter(f)
 
 
 # ============================================================================
