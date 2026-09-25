@@ -566,6 +566,15 @@ class BaseEngine(ABC):
         self._bar_idx: int = 0
         self._active_symbol: str = ""  # set by _rebalance/_close_position for subclass use
 
+        # T3: Partial fill configuration (opt-in, default off = zero regression)
+        self.partial_fill_enabled: bool = bool(config.get("partial_fill_enabled", False))
+        self.partial_fill_max_participation: float = float(
+            config.get("partial_fill_max_participation", 0.1)
+        )
+        self.partial_fill_max_bars: int = int(config.get("partial_fill_max_bars", 5))
+        # Pending weight adjustments carried across bars when partial fill is active
+        self._pending_targets: Dict[str, float] = {}
+
     # ── Market rule interface (subclass must implement) ──
 
     @abstractmethod
@@ -1217,6 +1226,15 @@ class BaseEngine(ABC):
                     target_weights[c] = None
                     logger.warning("Target weight failed for %s at %s: %s", c, ts, exc)
 
+            # T3: Apply partial-fill smoothing when enabled.  Large weight
+            # changes are capped per bar and the remainder is carried forward
+            # in _pending_targets for subsequent bars.  When disabled this is
+            # a no-op (zero regression guarantee).
+            if self.partial_fill_enabled and execute_targets and not stop_run:
+                target_weights = self._apply_partial_fill_smoothing(
+                    target_weights, data_map, ts, equity, codes,
+                )
+
             if self.position_adjustment == "rebalance":
                 if execute_targets and not stop_run:
                     self._execute_target_rebalance(
@@ -1648,6 +1666,80 @@ class BaseEngine(ABC):
                     target_w,
                     previous,
                 )
+
+    # ── T3: Partial-fill smoothing ─────────────────────────────────────
+
+    def _apply_partial_fill_smoothing(
+        self,
+        target_weights: Dict[str, Optional[float]],
+        data_map: Dict[str, pd.DataFrame],
+        ts: "pd.Timestamp",
+        equity: float,
+        codes: List[str],
+    ) -> Dict[str, Optional[float]]:
+        """Cap per-bar weight changes and carry the remainder forward.
+
+        When ``partial_fill_enabled`` is True, any single-symbol weight delta
+        that would require trading more than ``max_participation × ADV`` of
+        shares in one bar is capped.  The uncapped portion is stored in
+        ``_pending_targets`` and added back to the next bar's target.
+
+        This method is a **no-op** when partial fill is disabled (the default),
+        guaranteeing zero regression for existing backtests.
+
+        Returns a (possibly modified) copy of *target_weights*.
+        """
+        smoothed: Dict[str, Optional[float]] = {}
+        new_pending: Dict[str, float] = {}
+
+        for symbol in codes:
+            raw_target = target_weights.get(symbol)
+            if raw_target is None:
+                smoothed[symbol] = None
+                continue
+
+            current_pos = self.positions.get(symbol)
+            current_weight = 0.0
+            if current_pos is not None and equity > 0:
+                current_weight = current_pos.direction * abs(current_pos.size) * current_pos.price / equity
+
+            # Combine any carried-over pending adjustment with this bar's target
+            pending = self._pending_targets.get(symbol, 0.0)
+            desired_delta = (raw_target - current_weight) + pending
+
+            if abs(desired_delta) < 1e-9:
+                smoothed[symbol] = raw_target
+                continue
+
+            # Estimate ADV in weight-space: need price + volume data
+            frame = data_map.get(symbol)
+            if frame is None or ts not in frame.index:
+                smoothed[symbol] = raw_target  # no data → pass through
+                continue
+
+            bar = frame.loc[ts]
+            adv_shares = float(bar.get("volume", 0))
+            price = float(bar.get("close", 0))
+            if adv_shares <= 0 or price <= 0 or equity <= 0:
+                smoothed[symbol] = raw_target  # can't estimate → pass through
+                continue
+
+            # Max weight change this bar = (ADV × participation × price) / equity
+            max_weight_delta = (adv_shares * self.partial_fill_max_participation * price) / equity
+
+            if abs(desired_delta) <= max_weight_delta:
+                # Fits in one bar — execute fully, clear pending
+                smoothed[symbol] = raw_target
+            else:
+                # Cap this bar, carry remainder
+                sign = 1 if desired_delta > 0 else -1
+                capped_delta = sign * max_weight_delta
+                smoothed[symbol] = current_weight + capped_delta
+                remainder = desired_delta - capped_delta
+                new_pending[symbol] = remainder
+
+        self._pending_targets = new_pending
+        return smoothed
 
     def _execute_target_rebalance(
         self,

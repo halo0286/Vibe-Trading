@@ -17,6 +17,7 @@ from src.quantlib.impact import (
     DEFAULT_LINEAR_IMPACT_COEFF,
     DEFAULT_SLIPPAGE_BPS,
     DEFAULT_SQRT_IMPACT_ETA,
+    decomposed_impact,
     delayed_execution,
     fixed_slippage,
     linear_impact,
@@ -263,3 +264,74 @@ def test_nonfinite_impact_inputs_are_rejected(bad):
         sqrt_impact(PRICE, 1, 1_000.0, ADV, bad)
     with pytest.raises(ValueError):
         sqrt_impact(PRICE, 1, 1_000.0, ADV, VOLATILITY, eta=bad)
+
+
+# ── T4: decomposed_impact tests ────────────────────────────────────────
+
+
+class TestDecomposedImpact:
+    """Tests for temporary/permanent impact decomposition."""
+
+    def test_components_sum_to_total(self):
+        temp, perm = decomposed_impact(PRICE, 1, 50_000, ADV, VOLATILITY)
+        fill = sqrt_impact(PRICE, 1, 50_000, ADV, VOLATILITY)
+        total = abs(fill - PRICE)
+        assert temp + perm == pytest.approx(total, rel=1e-10)
+
+    def test_both_non_negative(self):
+        temp, perm = decomposed_impact(PRICE, 1, 50_000, ADV, VOLATILITY)
+        assert temp >= 0
+        assert perm >= 0
+
+    def test_zero_volume_zero_impact(self):
+        temp, perm = decomposed_impact(PRICE, 1, 0, ADV, VOLATILITY)
+        assert temp == 0.0
+        assert perm == 0.0
+
+    def test_permanent_fraction_zero(self):
+        temp, perm = decomposed_impact(
+            PRICE, 1, 50_000, ADV, VOLATILITY, permanent_fraction=0.0
+        )
+        assert perm == 0.0
+        fill = sqrt_impact(PRICE, 1, 50_000, ADV, VOLATILITY)
+        assert temp == pytest.approx(abs(fill - PRICE))
+
+    def test_permanent_fraction_one(self):
+        temp, perm = decomposed_impact(
+            PRICE, 1, 50_000, ADV, VOLATILITY, permanent_fraction=1.0
+        )
+        assert temp == pytest.approx(0.0)
+        fill = sqrt_impact(PRICE, 1, 50_000, ADV, VOLATILITY)
+        assert perm == pytest.approx(abs(fill - PRICE))
+
+    def test_default_fraction(self):
+        temp, perm = decomposed_impact(PRICE, 1, 50_000, ADV, VOLATILITY)
+        # Default permanent_fraction=0.3
+        fill = sqrt_impact(PRICE, 1, 50_000, ADV, VOLATILITY)
+        total = abs(fill - PRICE)
+        assert perm == pytest.approx(total * 0.3, rel=1e-10)
+        assert temp == pytest.approx(total * 0.7, rel=1e-10)
+
+    def test_sell_direction(self):
+        temp, perm = decomposed_impact(PRICE, -1, 50_000, ADV, VOLATILITY)
+        assert temp >= 0
+        assert perm >= 0
+        fill = sqrt_impact(PRICE, -1, 50_000, ADV, VOLATILITY)
+        assert temp + perm == pytest.approx(abs(fill - PRICE), rel=1e-10)
+
+    def test_monotone_in_volume(self):
+        t1, p1 = decomposed_impact(PRICE, 1, 10_000, ADV, VOLATILITY)
+        t2, p2 = decomposed_impact(PRICE, 1, 100_000, ADV, VOLATILITY)
+        assert t2 > t1
+        assert p2 > p1
+
+    def test_invalid_permanent_fraction_raises(self):
+        with pytest.raises(ValueError, match="permanent_fraction"):
+            decomposed_impact(PRICE, 1, 50_000, ADV, VOLATILITY, permanent_fraction=-0.1)
+        with pytest.raises(ValueError, match="permanent_fraction"):
+            decomposed_impact(PRICE, 1, 50_000, ADV, VOLATILITY, permanent_fraction=1.5)
+
+    def test_custom_eta(self):
+        t1, p1 = decomposed_impact(PRICE, 1, 50_000, ADV, VOLATILITY, eta=0.3)
+        t2, p2 = decomposed_impact(PRICE, 1, 50_000, ADV, VOLATILITY, eta=0.8)
+        assert t2 + p2 > t1 + p1  # higher eta → more total impact

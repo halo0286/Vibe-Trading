@@ -41,17 +41,6 @@ from numpy.typing import ArrayLike
 #: Public surface. `quantlib_call` dispatches on ``__all__`` alone, so a module
 #: without it is unreachable from Web / API / MCP even when the tool allowlists
 #: it — which is exactly what happened to this module until 0.1.13.
-__all__ = [
-    "DEFAULT_DELAY_BARS",
-    "DEFAULT_LINEAR_IMPACT_COEFF",
-    "DEFAULT_SLIPPAGE_BPS",
-    "DEFAULT_SQRT_IMPACT_ETA",
-    "delayed_execution",
-    "fixed_slippage",
-    "linear_impact",
-    "sqrt_impact",
-]
-
 #: Default fixed slippage in basis points (1bp = 0.01%).
 DEFAULT_SLIPPAGE_BPS = 5.0
 
@@ -279,3 +268,81 @@ def delayed_execution(signal_series: pd.Series, delay_bars: int = DEFAULT_DELAY_
     if delay_bars < 0:
         raise ValueError(f"delay_bars must be non-negative; a negative shift is look-ahead bias, got {delay_bars!r}")
     return signal_series.shift(delay_bars)
+
+
+def decomposed_impact(
+    price: float,
+    direction: int,
+    volume_traded: float,
+    adv: float,
+    volatility: float,
+    *,
+    permanent_fraction: float = 0.3,
+    eta: float = DEFAULT_SQRT_IMPACT_ETA,
+) -> tuple[float, float]:
+    """Split market impact into temporary and permanent components (T4).
+
+    The total impact follows the square-root model (``eta * sigma * sqrt(V/ADV)``),
+    then is split into:
+
+    * **Temporary**: dissipates after the current bar; represents the cost of
+      consuming liquidity that replenishes.
+    * **Permanent**: persists indefinitely; represents information leakage that
+      moves the equilibrium price.
+
+    Parameters
+    ----------
+    price : float
+        Reference price before impact, strictly positive.
+    direction : int
+        +1 for buy, −1 for sell.
+    volume_traded : float
+        Order size in shares, non-negative.
+    adv : float
+        Average daily volume, strictly positive.
+    volatility : float
+        Daily return volatility as a decimal fraction, non-negative.
+    permanent_fraction : float
+        Fraction of total impact that is permanent (default 0.3).
+        Must be in [0, 1].
+    eta : float
+        Square-root impact elasticity (default :data:`DEFAULT_SQRT_IMPACT_ETA`).
+
+    Returns
+    -------
+    tuple[float, float]
+        ``(temporary_impact, permanent_impact)`` in price units.
+        Both values are ≥ 0.  Their sum equals the total sqrt impact.
+
+    Raises
+    ------
+    ValueError
+        If inputs violate constraints (same as :func:`sqrt_impact`, plus
+        ``permanent_fraction`` not in [0, 1]).
+    """
+    if not (0.0 <= permanent_fraction <= 1.0):
+        raise ValueError(
+            f"permanent_fraction must be in [0, 1], got {permanent_fraction}"
+        )
+
+    # Compute total sqrt impact in price units
+    fill_price = sqrt_impact(price, direction, volume_traded, adv, volatility, eta=eta)
+    total_impact = abs(fill_price - price)
+
+    permanent = total_impact * permanent_fraction
+    temporary = total_impact - permanent
+
+    return (temporary, permanent)
+
+
+__all__ = [
+    "DEFAULT_DELAY_BARS",
+    "DEFAULT_LINEAR_IMPACT_COEFF",
+    "DEFAULT_SLIPPAGE_BPS",
+    "DEFAULT_SQRT_IMPACT_ETA",
+    "decomposed_impact",
+    "delayed_execution",
+    "fixed_slippage",
+    "linear_impact",
+    "sqrt_impact",
+]
