@@ -24,6 +24,18 @@ from .masking import MaskFilter
 from .trace import get_business_id, get_span_id, get_trace_id
 
 
+# LogRecord 保留属性：无法通过 logging 的 extra 直接传递（会抛
+# KeyError: "Attempt to overwrite '<name>' in LogRecord"）。业务字段中
+# args / module / lineno / funcName 等会与之冲突，统一加 "ls_" 前缀，
+# 由 _RotatingPidFileHandler._record_fields 还原为原始字段名。
+_LOGRECORD_RESERVED = frozenset({
+    "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
+    "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
+    "created", "msecs", "relativeCreated", "thread", "threadName",
+    "processName", "process", "taskName", "message", "asctime",
+})
+
+
 # JSON 可序列化兜底（datetime 等）
 class _JsonSafeEncoder(json.JSONEncoder):
     def default(self, o: Any) -> Any:
@@ -138,7 +150,11 @@ class _RotatingPidFileHandler(logging.Handler):
         for k in ("business_id", "trace_id", "span_id", "step", "status",
                   "cost_ms", "error_code", "error_msg", "args", "result",
                   "exception_type", "stack_trace", "business_done"):
-            if hasattr(record, k):
+            # 优先读取 "ls_" 别名（log_business_event 对 LogRecord 保留属性
+            # 冲突键加了前缀），否则回退到同名属性。
+            if hasattr(record, f"ls_{k}"):
+                fields[k] = getattr(record, f"ls_{k}")
+            elif hasattr(record, k):
                 fields[k] = getattr(record, k)
         # extra_fields 配置注入
         for k, v in self.config.extra_fields.items():
@@ -363,5 +379,6 @@ def log_business_event(
             return  # 被限流丢弃
     merged_extra = {"_logsystem_extra": ctx}
     for k, v in ctx.items():
-        merged_extra[k] = v
+        # 冲突键加 "ls_" 前缀，避免 logging 因覆盖 LogRecord 保留属性而抛错
+        merged_extra[f"ls_{k}" if k in _LOGRECORD_RESERVED else k] = v
     logger.log(level, message, extra=merged_extra)

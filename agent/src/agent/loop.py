@@ -1245,6 +1245,18 @@ class AgentLoop:
         try:
             return self._run_bound(user_message, history, session_id)
         finally:
+            # task3 自闭环：业务（一次研究会话）完成后，异步分析本次会话的
+            # 日志并产出报告。仅在 logsystem 已初始化时触发，避免测试环境
+            # 产生额外副作用；分析失败静默，绝不影响主流程。
+            try:
+                from src.logsystem.logger import _configured as _ls_configured
+
+                if _ls_configured is not None:
+                    from src.logsystem_bootstrap import finish_and_analyze
+
+                    finish_and_analyze(business_id=session_id or None)
+            except Exception:
+                pass
             reset_llm_session_id(token)
 
     def _run_bound(self, user_message: str, history: Optional[List[Dict[str, Any]]] = None, session_id: str = "") -> Dict[str, Any]:
