@@ -77,7 +77,12 @@ def _fetch_fear_greed() -> dict[str, Any] | None:
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Vibe-Trading/1.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:
-            body = json.loads(resp.read(10 * 1024 * 1024).decode())
+            # S-7 fix: 限制响应大小防 OOM；兼容不接受 size 参数的实现/mock
+            try:
+                raw = resp.read(10 * 1024 * 1024)
+            except TypeError:
+                raw = resp.read()
+            body = json.loads(raw.decode())
     except Exception as exc:
         logger.debug("Fear & Greed fetch failed: %s", exc)
         return None

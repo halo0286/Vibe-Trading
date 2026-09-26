@@ -193,13 +193,27 @@ def forward(
 # --------------------------------------------------------------------------- #
 
 
+# S-7 fix: cap response reads to avoid OOM on malicious/large payloads.
+# 注意：部分 Response 实现（含测试用 mock）的 read() 不接受 size 参数，
+# 因此回退到无参 read()，避免破坏既有行为。
+_MAX_HTTP_BYTES = 10 * 1024 * 1024
+
+
+def _read_capped(resp) -> bytes:
+    """读取响应体并限制最大字节数，兼容不支持 size 参数的实现。"""
+    try:
+        return resp.read(_MAX_HTTP_BYTES)
+    except TypeError:
+        return resp.read()
+
+
 def _http(method: str, url: str, headers: dict[str, str], data: bytes | None, timeout: float):
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, resp.read(10 * 1024 * 1024).decode("utf-8", "replace")
+            return resp.status, _read_capped(resp).decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read(10 * 1024 * 1024).decode("utf-8", "replace")
+        return exc.code, _read_capped(exc).decode("utf-8", "replace")
     except urllib.error.URLError as exc:
         return 0, json.dumps({"error": f"connection failed: {exc.reason}"})
 

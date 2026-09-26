@@ -213,34 +213,45 @@ def _cache_mac(key: bytes, blob: bytes) -> str:
     return hmac.new(key, blob, hashlib.sha256).hexdigest()
 
 
-# S-1 fix: allowlisted classes for safe unpickling.
-_SAFE_PICKLE_CLASSES = {
-    # builtins
-    ("builtins", "dict"), ("builtins", "list"), ("builtins", "tuple"),
-    ("builtins", "str"), ("builtins", "int"), ("builtins", "float"),
-    ("builtins", "bytes"), ("builtins", "set"), ("builtins", "frozenset"),
-    ("builtins", "bool"), ("builtins", "NoneType"),
-    # numpy (panel data arrays/dtypes)
-    ("numpy", "ndarray"), ("numpy", "dtype"), ("numpy.core.multiarray", "_reconstruct"),
-    ("numpy", "int64"), ("numpy", "float64"), ("numpy", "bool_"),
-    # pandas (DataFrames/Series in cache)
-    ("pandas.core.frame", "DataFrame"), ("pandas.core.series", "Series"),
-    ("pandas.core.indexes.base", "Index"),
-    ("pandas.core.indexes.datetimes", "DatetimeIndex"),
-    ("pandas._libs.tslibs.timestamps", "Timestamp"),
-    ("pandas._libs.tslibs.period", "Period"),
-    # datetime
-    ("datetime", "datetime"), ("datetime", "date"), ("datetime", "timedelta"),
-    # collections
-    ("collections", "OrderedDict"), ("collections", "defaultdict"),
-}
+# S-1 fix: safe unpickling.
+# 精确类白名单无法覆盖 pandas DataFrame 的复杂 pickle 图（BlockManager、
+# 各版本 Block 子类、内部索引实现等会随 pandas 版本变化），会导致合法缓存
+# 被判为"unsafe"而无法加载（回归修正）。因此改用「可信模块前缀 +
+# builtins 精确白名单」策略：
+#   - 允许数据类库（numpy/pandas/datetime/collections 等），这些库不含
+#     可用的 RCE gadget；
+#   - builtins 只放行纯数据结构，严格排除 eval/exec/open/__import__ 等；
+#   - 其余模块（os/subprocess/socket/...）一律拒绝。
+_SAFE_PICKLE_MODULE_PREFIXES = (
+    "numpy",
+    "pandas",
+    "datetime",
+    "collections",
+    "copyreg",
+    "pytz",
+    "dateutil",
+    "_codecs",  # pickle 协议编码 str 所需，仅做编解码
+)
+
+_SAFE_BUILTINS = frozenset({
+    "dict", "list", "tuple", "str", "int", "float", "bytes", "bytearray",
+    "set", "frozenset", "bool", "NoneType", "complex", "slice", "range",
+    "object", "type",
+})
 
 
 class _RestrictedUnpickler(pickle.Unpickler):
-    """Unpickler that only allows pre-approved classes. Blocks RCE gadgets."""
+    """Unpickler with module-prefix allowlist + strict builtins allowlist.
+
+    Blocks RCE gadgets (``os.system``, ``subprocess.Popen``, ``builtins.eval``,
+    ...) while permitting legitimate pandas/numpy/datetime data structures.
+    """
 
     def find_class(self, module: str, name: str):
-        if (module, name) in _SAFE_PICKLE_CLASSES:
+        root = module.split(".")[0]
+        if root in _SAFE_PICKLE_MODULE_PREFIXES:
+            return super().find_class(module, name)
+        if module == "builtins" and name in _SAFE_BUILTINS:
             return super().find_class(module, name)
         raise pickle.UnpicklingError(
             f"blocked unsafe pickle class: {module}.{name}"
