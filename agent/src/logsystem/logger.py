@@ -298,7 +298,14 @@ class GlobalLogger:
     def _setup_handlers(self) -> None:
         cfg = self.config
         # 终端
-        console = logging.StreamHandler(stream=sys.stdout)
+        # 控制台日志走 **stderr**，业务/机器可读输出走 stdout。
+        # 历史缺陷：console handler 挂在 stdout，导致 `cli run --json` 的
+        # stdout 变成「若干人类可读日志行 + JSON」，json.loads(stdout) 直接
+        # JSONDecodeError —— 破坏了机器可读输出的契约。
+        # 需要旧行为的场景可设 VIBE_LOG_CONSOLE_STREAM=stdout。
+        _stream_name = os.environ.get("VIBE_LOG_CONSOLE_STREAM", "stderr").strip().lower()
+        _console_stream = sys.stdout if _stream_name == "stdout" else sys.stderr
+        console = logging.StreamHandler(stream=_console_stream)
         console.setLevel(cfg.console_level or cfg.level)
         console.setFormatter(_BusinessFormatter(cfg.console_format))
         # 文件
