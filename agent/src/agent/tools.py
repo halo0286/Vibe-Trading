@@ -125,8 +125,10 @@ def _log_tool_call(
             "cost_ms": round(cost_ms, 3),
             "args": json.dumps(_mask_tool_params(params), ensure_ascii=False, default=str),
         }
-        if status == "success":
-            extra["result"] = _summarize_tool_result(result)
+        # 成功与失败都要落盘载荷摘要：失败时若不记，日志里只剩
+        # `status=failed`，**为什么失败完全不可见**（此前只在成功分支记录，
+        # 而载荷式失败又不带异常，于是 error_code/error_msg/result 全为空）。
+        extra["result"] = _summarize_tool_result(result)
 
         error_code = None
         error_msg = None
@@ -135,6 +137,21 @@ def _log_tool_call(
             error_msg = str(error)[:500]
             extra["exception_type"] = type(error).__name__
             extra["stack_trace"] = traceback.format_exc()[:4000]
+        elif status != "success":
+            # 载荷式失败（工具返回 {"status": ...} 而不抛异常）：
+            # 从载荷里提取状态与原因，让失败可诊断。
+            try:
+                from src.logsystem_bootstrap import result_error
+
+                payload = result
+                if isinstance(payload, str) and len(payload) <= _OUTCOME_PARSE_LIMIT:
+                    payload = json.loads(payload)
+                if isinstance(payload, dict):
+                    error_code, error_msg = result_error(payload)
+                    if error_msg:
+                        error_msg = str(error_msg)[:500]
+            except Exception:
+                pass
 
         # P0-2：统一走 logsystem_bootstrap.current_business_id()
         # （trace_scope 优先，其次 LLM session_id 兜底），避免调用点各自兜底。
@@ -151,7 +168,12 @@ def _log_tool_call(
         with _scope:
             log_business_event(
                 _logsystem_logger,
-                logging.ERROR if error is not None else logging.INFO,
+                # 载荷式失败（工具返回 {"status": ...} 而非抛异常）此前记为 INFO，
+                # 使失败调用在按 level 的告警/grep 里完全不可见。现在：
+                # 真实异常 → ERROR；业务失败 → WARNING；成功 → INFO。
+                logging.ERROR
+                if error is not None
+                else (logging.WARNING if status != "success" else logging.INFO),
                 f"tool {name} {status}",
                 step=f"tool.{name}",
                 status=status,

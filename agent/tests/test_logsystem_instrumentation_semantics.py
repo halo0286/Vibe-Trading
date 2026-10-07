@@ -272,3 +272,70 @@ def test_tool_outcome_large_payload_prefix_failure():
     huge = _json.dumps({"status": "timeout", "data": [{"a": 1}] * 400000})
     assert len(huge) > 1_000_000
     assert _tool_outcome(huge) == "failed"
+
+
+# --------------------------------------------------------------------------- #
+# H-8：工具业务失败必须带原因，且不能被记为 INFO
+# --------------------------------------------------------------------------- #
+
+def _make_tool(name, payload):
+    """构造一个返回固定 JSON 载荷的 BaseTool 子类。
+
+    用 ``type()`` 建类，使 ``execute`` 出现在类命名空间里 —— ABCMeta 只在
+    类创建时计算 ``__abstractmethods__``，事后赋值不算实现。
+    """
+    import json as _json
+
+    from src.agent.tools import BaseTool
+
+    cls = type(
+        "_Tool",
+        (BaseTool,),
+        {
+            "name": name,
+            "description": "d",
+            "parameters": {"type": "object", "properties": {}},
+            "execute": lambda self, **kwargs: _json.dumps(payload),
+        },
+    )
+    return cls()
+
+
+def _run_tool(tmp_path, tool):
+    from src.agent.tools import ToolRegistry
+    from src.logsystem import LogConfig, configure
+
+    configure(LogConfig(log_dir=str(tmp_path), level="INFO",
+                        enable_async_analysis=False))
+    registry = ToolRegistry()
+    registry.register(tool)
+    registry.execute(tool.name, {})
+    return _line_for(_read(tmp_path), f"tool.{tool.name}")
+
+
+def test_tool_payload_failure_keeps_reason(tmp_path):
+    """载荷式失败必须落盘 error_code/error_msg/result（此前三者全空）。"""
+    tool = _make_tool("fake_err_tool", {"status": "error", "error": "boom: ledger rejected"})
+    fields = _run_tool(tmp_path, tool)
+
+    assert fields["status"] == "failed", fields
+    assert fields.get("error_msg") and "ledger rejected" in fields["error_msg"], fields
+    assert fields.get("result"), "失败记录丢失载荷摘要"
+
+
+def test_tool_payload_failure_is_not_info(tmp_path):
+    """载荷式失败不能被记为 INFO（否则按 level 的告警看不到）。"""
+    tool = _make_tool("fake_timeout_tool", {"status": "timeout", "reason": "upstream slow"})
+    fields = _run_tool(tmp_path, tool)
+
+    assert fields["status"] == "failed", fields
+    assert fields.get("level") in ("WARNING", "ERROR"), fields
+    assert fields.get("error_msg") and "slow" in fields["error_msg"], fields
+
+
+def test_tool_success_stays_info(tmp_path):
+    tool = _make_tool("fake_ok_tool", {"status": "ok", "n": 1})
+    fields = _run_tool(tmp_path, tool)
+
+    assert fields["status"] == "success", fields
+    assert fields.get("level") == "INFO", fields
