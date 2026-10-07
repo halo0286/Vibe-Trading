@@ -136,9 +136,22 @@ class _RotatingPidFileHandler(logging.Handler):
         parts = []
         for k, v in fields.items():
             s = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, default=str)
-            # 含空格的值用引号包裹
-            if any(ch in s for ch in (" ", "\t")):
-                s = '"' + s.replace('"', '\\"') + '"'
+            # 值里可能含换行/制表/引号（异常堆栈、第三方返回体）。
+            # 必须**转义控制字符并加引号**，否则：
+            #   1. 一条记录被拆成多行，行式解析器读到残缺行；
+            #   2. 攻击者可用 "\nbusiness_id=victim cost_ms=999999 status=failed"
+            #      **伪造**日志记录，直接污染分析器统计 —— 这是日志完整性与
+            #      审计可信性问题，不只是显示问题。
+            if any(ch in s for ch in (' ', '\t', '\n', '\r', '"')):
+                s = (
+                    '"'
+                    + s.replace("\\", "\\\\")
+                    .replace('"', '\\"')
+                    .replace("\n", "\\n")
+                    .replace("\r", "\\r")
+                    .replace("\t", "\\t")
+                    + '"'
+                )
             parts.append(f"{k}={s}")
         return " ".join(parts)
 
@@ -154,7 +167,7 @@ class _RotatingPidFileHandler(logging.Handler):
         }
         for k in ("business_id", "trace_id", "span_id", "step", "status",
                   "cost_ms", "error_code", "error_msg", "args", "result",
-                  "exception_type", "stack_trace", "business_done"):
+                  "exception_type", "stack_trace", "exc_text", "business_done"):
             # 优先读取 "ls_" 别名（log_business_event 对 LogRecord 保留属性
             # 冲突键加了前缀），否则回退到同名属性。
             if hasattr(record, f"ls_{k}"):
