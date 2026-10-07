@@ -1161,7 +1161,19 @@ class AgentLoop:
         except Exception:
             _scope = contextlib.nullcontext()
         try:
+            _effective_bid: Optional[str] = None
             with _scope:
+                # 记录**实际写入日志的** business_id：它可能来自外层
+                # （CLI 注入 / trace_scope），而非 session_id。收尾分析必须
+                # 按同一个 id 过滤，否则会「报告生成了但一条日志都没匹配到」
+                # （实测：CLI 注入 business_id 后，按 session_id 分析得到
+                # total_logs=0、summary="未找到匹配日志"）。
+                try:
+                    from src.logsystem_bootstrap import current_business_id as _cbid
+
+                    _effective_bid = _cbid() or session_id or None
+                except Exception:
+                    _effective_bid = session_id or None
                 _agent_log("started", session_id, user_message, _t0)
                 try:
                     result = self._run_bound(user_message, history, session_id)
@@ -1180,7 +1192,9 @@ class AgentLoop:
                 if _ls_configured is not None:
                     from src.logsystem_bootstrap import finish_and_analyze
 
-                    finish_and_analyze(business_id=session_id or None)
+                    finish_and_analyze(
+                        business_id=_effective_bid or session_id or None
+                    )
             except Exception:
                 pass
             reset_llm_session_id(token)

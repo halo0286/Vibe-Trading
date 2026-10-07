@@ -30,6 +30,7 @@ from src.logsystem import (
     trace_scope,
     run_analysis,
     run_analysis_async,
+    drain_analysis_tasks,
     copy_trace_context,
     register_business_id_resolver,
     resolve_business_id,
@@ -259,6 +260,18 @@ def traced_step(step: str, *, summarize=None):
     return deco
 
 
+def drain_analysis() -> int:
+    """等待本进程发起的异步日志分析完成（一次性进程退出前必须调用）。
+
+    CLI 等短命进程若不调用，daemon 分析线程会被进程退出直接杀死，
+    「业务完成后自动分析闭环」形同虚设。
+    """
+    try:
+        return drain_analysis_tasks()
+    except Exception:
+        return 0
+
+
 __all__ = [
     "init_logging",
     "project_logger",
@@ -267,6 +280,7 @@ __all__ = [
     "register_business_id_provider",
     "safe_log_event",
     "traced_step",
+    "drain_analysis",
     "log_call",
     "log_event",
     "log_business_event",

@@ -46,7 +46,7 @@ from .logger import (
     log_business_event,
 )
 from .decorator import log_call, LoggedContext, current_call
-from .analyzer import run_analysis, run_analysis_async, LogAnalyzer
+from .analyzer import run_analysis, run_analysis_async, drain_analysis_tasks, LogAnalyzer
 
 #: 核心 API —— 业务接入只需这 8 个。
 #: 覆盖「配置 → 取 logger → 记事件 → 记调用 → 串链路 → 读业务 ID → 出分析报告」闭环。
@@ -86,6 +86,7 @@ ADVANCED_API = (
     "LoggedContext",
     "current_call",
     "run_analysis_async",
+    "drain_analysis_tasks",
     "LogAnalyzer",
 )
 

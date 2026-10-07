@@ -1550,7 +1550,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         except Exception:
             pass
 
-    return int(_legacy.main(raw_argv))
+    _rc = int(_legacy.main(raw_argv))
+
+    # 一次性命令退出前必须等待异步日志分析完成：分析线程是 daemon，
+    # 进程退出会直接杀死它，导致「业务完成后自动分析闭环」永不产出报告
+    # （实测 11 个场景 0 份 analysis_*.json）。
+    try:
+        from src.logsystem_bootstrap import drain_analysis
+
+        drain_analysis()
+    except Exception:
+        pass
+
+    return _rc
 
 
 def _extract_max_iter(argv: Sequence[str], *, default: int) -> int:

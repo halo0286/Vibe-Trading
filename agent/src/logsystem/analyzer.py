@@ -241,3 +241,26 @@ def run_analysis_async(
     _analysis_tasks[key] = t
     t.start()
     return t
+
+
+def drain_analysis_tasks(timeout: float = 15.0) -> int:
+    """等待并回收已发起的异步分析任务，返回**加入等待**的任务数。
+
+    存在的原因：``run_analysis_async`` 起的是 daemon 线程。对**一次性进程**
+    （CLI 命令）而言，命令返回后进程立即退出，daemon 线程被直接杀死 ——
+    分析从未真正执行，也从不产出报告，「业务完成后自动分析闭环」实际失效
+    （实测 11 个场景 0 份分析报告）。长驻服务（api/mcp）不受影响。
+
+    调用方应在进程退出前调用本函数，使闭环真正落地。
+    """
+    threads = [t for t in list(_analysis_tasks.values()) if t.is_alive()]
+    for t in threads:
+        try:
+            t.join(timeout=timeout)
+        except Exception:
+            pass
+    done = sum(1 for t in threads if not t.is_alive())
+    for key, th in list(_analysis_tasks.items()):
+        if not th.is_alive():
+            _analysis_tasks.pop(key, None)
+    return done
