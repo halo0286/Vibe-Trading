@@ -45,25 +45,53 @@ def init_logging(
     level: str = "INFO",
     enable_async_analysis: bool = True,
 ) -> None:
-    """初始化日志系统（幂等，可重复调用）。
+    """初始化日志系统（**真正的幂等**，可重复调用）。
 
-    log_dir 默认放到项目 data 目录下的 logs/，避免污染源码仓库；
-    可用环境变量 VIBE_LOG_DIR 覆盖。
+    幂等语义：已初始化过、或宿主已自行 ``configure()`` 时**直接返回**，
+    绝不覆盖既有配置。历史实现把 ``_inited`` 置位却从不读取，于是每次调用
+    都重建 handler：嵌入式宿主先 ``configure(for_test(...))`` 再走 CLI 入口，
+    配置会被整个替换（log_dir 与 retention_days 都被改写）。这也顺带修掉
+    ``cli serve`` 的双重初始化。
+
+    log_dir 优先级：显式参数 → ``VIBE_LOG_DIR`` → **运行时根**下的 logs/
+    （遵循 ``VIBE_TRADING_HOME``）。历史默认值 ``parents[2]/"logs"`` 在源码
+    运行时是仓库 logs/，但 **pip 安装后**会解析成 ``<prefix>/logs``
+    （如 /usr/lib/python3.12/logs），既常不可写又与项目其它部分不一致。
     """
     global _inited
-    root = log_dir or os.environ.get("VIBE_LOG_DIR") or str(
-        Path(__file__).resolve().parents[2] / "logs"
-    )
-    configure(
-        LogConfig(
-            log_dir=root,
-            level=level,
-            file_format="kv",  # key=value 结构化，便于后续自动分析
-            extra_fields={"project": "vibe-trading"},
-            enable_async_analysis=enable_async_analysis,
+    from src.logsystem.logger import _configured as _already_configured
+
+    if _inited or _already_configured is not None:
+        return
+    root = log_dir or os.environ.get("VIBE_LOG_DIR") or str(_default_log_dir())
+    try:
+        configure(
+            LogConfig(
+                log_dir=root,
+                level=level,
+                file_format="kv",  # key=value 结构化，便于后续自动分析
+                extra_fields={"project": "vibe-trading"},
+                enable_async_analysis=enable_async_analysis,
+            )
         )
-    )
+    except Exception as exc:
+        # 不能静默：目录不可写时 _configured 会保持 None，全部埋点与自动分析
+        # 都悄无声息地失效（调用方通常 except 掉，现场完全看不到原因）。
+        logging.getLogger(__name__).warning(
+            "logsystem 初始化失败（日志与自动分析将不可用）：%s", exc
+        )
+        raise
     _inited = True
+
+
+def _default_log_dir() -> Path:
+    """默认日志目录：运行时根（遵循 VIBE_TRADING_HOME）下的 logs/。"""
+    try:
+        from src.config.paths import get_runtime_root
+
+        return get_runtime_root() / "logs"
+    except Exception:
+        return Path(__file__).resolve().parents[2] / "logs"
 
 
 def project_logger(name: Optional[str] = None) -> logging.Logger:
