@@ -57,6 +57,7 @@ import numpy as np
 import pandas as pd
 
 from src.factors.factor_analysis_core import compute_ic_series
+from src.logsystem_bootstrap import traced_step
 from src.factors.registry import (
     Registry,
     RegistryError,
@@ -314,6 +315,23 @@ def categorise_strict(
 # ── Public entrypoint ──────────────────────────────────────────────────────
 
 
+
+def _strict_summary(args: tuple, kwargs: dict, result: Any) -> dict:
+    """抽取严格 bench 的业务摘要（随机对照/OOS 切分/多重检验）。"""
+    out = {}
+    for name, idx in (("zoo", 0), ("universe", 1), ("period", 2)):
+        out[name] = kwargs.get(name) if name in kwargs else (args[idx] if len(args) > idx else None)
+    for name in ("random_control", "oos_split", "training_cutoff", "n_random_seeds"):
+        if name in kwargs:
+            out[name] = kwargs[name]
+    if isinstance(result, dict):
+        verdict = result.get("verdict") or result.get("status")
+        if verdict is not None:
+            out["verdict"] = verdict
+    return out
+
+
+@traced_step("factor.bench_strict", summarize=_strict_summary)
 def run_bench_strict(
     zoo: str,
     universe: str,

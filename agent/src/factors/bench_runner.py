@@ -25,6 +25,7 @@ from typing import Any, Callable, Iterable
 import numpy as np
 
 from src.config.accessor import get_env_config
+from src.logsystem_bootstrap import traced_step
 from src.factors.factor_analysis_core import compute_ic_series
 from src.quantlib.multipletesting import (
     MIN_OBSERVATIONS,
@@ -134,6 +135,31 @@ def theme_breakdown(rows: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
     return by_theme
 
 
+
+def _bench_summary(args: tuple, kwargs: dict, result: Any) -> dict:
+    """抽取 factor bench 的业务摘要（zoo/股票池/周期/因子存活统计）。"""
+
+    def pick(name: str, idx: int):
+        if name in kwargs:
+            return kwargs[name]
+        return args[idx] if len(args) > idx else None
+
+    out = {
+        "zoo": pick("zoo", 0),
+        "universe": pick("universe", 1),
+        "period": pick("period", 2),
+    }
+    if isinstance(result, dict):
+        for key in ("alive", "reversed", "dead", "n_skipped"):
+            if key in result:
+                out[key] = result[key]
+        rows = result.get("rows")
+        if isinstance(rows, list):
+            out["factors"] = len(rows)
+    return out
+
+
+@traced_step("factor.bench", summarize=_bench_summary)
 def run_bench(
     zoo: str,
     universe: str,

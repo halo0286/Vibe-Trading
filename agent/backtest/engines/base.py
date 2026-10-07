@@ -15,6 +15,8 @@ import math
 import re as _re
 import sys
 from abc import ABC, abstractmethod
+
+from src.logsystem_bootstrap import traced_step
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
@@ -493,6 +495,39 @@ def _maybe_enrich_events(
 # ─── Base Engine ───
 
 
+def _backtest_summary(args: tuple, kwargs: dict, result: Any) -> dict:
+    """抽取回测业务摘要（引擎/标的数/区间/核心绩效指标）。
+
+    args[0] 是 self —— 据此记录实际生效的市场引擎类名
+    （14 个引擎共用 BaseEngine.run_backtest，不记引擎名就无法区分场景）。
+    """
+    out: dict = {}
+    if args:
+        out["engine"] = type(args[0]).__name__
+    config = kwargs.get("config")
+    if config is None and args:
+        config = args[1] if len(args) > 1 else None
+    if isinstance(config, dict):
+        codes = config.get("codes")
+        if isinstance(codes, list):
+            out["symbols"] = len(codes)
+        for key in ("start_date", "end_date", "interval", "strategy", "initial_capital"):
+            if key in config and isinstance(config[key], (str, int, float)):
+                out[key] = config[key]
+    if isinstance(result, dict):
+        for key in (
+            "total_return", "annual_return", "excess_return", "sharpe",
+            "max_drawdown", "volatility", "win_rate", "final_value",
+        ):
+            value = result.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                out[key] = round(value, 6) if isinstance(value, float) else value
+        trades = result.get("trades")
+        if isinstance(trades, list):
+            out["trades"] = len(trades)
+    return out
+
+
 class BaseEngine(ABC):
     """Abstract base for all market engines.
 
@@ -885,6 +920,7 @@ class BaseEngine(ABC):
 
     # ── Main entry ──
 
+    @traced_step("backtest.run", summarize=_backtest_summary)
     def run_backtest(
         self,
         config: Dict[str, Any],

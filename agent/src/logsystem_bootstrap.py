@@ -11,8 +11,10 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -29,6 +31,8 @@ from src.logsystem import (
     run_analysis,
     run_analysis_async,
     copy_trace_context,
+    register_business_id_resolver,
+    resolve_business_id,
 )
 
 _inited = False
@@ -97,12 +101,16 @@ def current_business_id() -> Optional[str]:
     1. ``trace_scope(business_id=...)`` 显式设置的值（最高优先级）
     2. 已注册的兜底 provider（默认含 LLM session_id）
 
-    把「logsystem 原生上下文」与「本项目特有来源」收敛到一处，
-    避免各调用点各自 import 私有模块、各自兜底。
+    与 ``logsystem.resolve_business_id()`` 等价：provider 链已通过
+    ``register_business_id_resolver`` 注册进 logsystem 本体，因此
+    **日志落盘路径自身**也走同一套兜底逻辑 —— 埋点无需在每处外层手动
+    包 ``trace_scope``，Agent 会话内自动获得 business_id。
     """
-    bid = get_business_id()
-    if bid:
-        return bid
+    return resolve_business_id()
+
+
+def _resolve_from_providers() -> Optional[str]:
+    """供 logsystem 内部日志路径调用的兜底解析器。"""
     for provider in _BUSINESS_ID_PROVIDERS:
         try:
             value = provider()
@@ -113,15 +121,18 @@ def current_business_id() -> Optional[str]:
     return None
 
 
+# 关键：把 provider 链注册进 logsystem 本体，使 log_business_event /
+# log_event / 终端格式化都会自动带上 business_id。
+register_business_id_resolver(_resolve_from_providers)
+
+
 def finish_and_analyze(
     business_id: Optional[str] = None,
     report_path: Optional[str] = None,
     sync: bool = False,
 ):
     """业务完成后触发自动分析（见 task2 analyzer 闭环）。"""
-    from src.logsystem import get_business_id
-
-    bid = business_id or get_business_id()
+    bid = business_id or resolve_business_id()
     _dir = os.environ.get("VIBE_LOG_DIR") or str(
         Path(__file__).resolve().parents[2] / "logs"
     )
@@ -152,10 +163,20 @@ def safe_log_event(
     异常（logsystem 未初始化、字段无法序列化、磁盘只读等），保证调用方
     逻辑与返回值完全不受日志影响。
 
+    **被动性约束（重要）**：日志系统未显式初始化时直接丢弃事件，绝不因
+    埋点而触发 ``configure()``。否则一次库调用就会改变进程全局状态 ——
+    创建 ``./logs``、挂上文件 handler、并激活 ``finish_and_analyze`` 的
+    自动分析线程。实测该副作用会污染宿主程序：在测试中表现为与被埋点
+    业务无关的随机失败（后台分析线程扫描日志目录产生 I/O 与资源竞争）。
+
     与 ``log_event`` 的区别：``log_event`` 会正常抛出配置类错误，便于
     开发期发现误用；``safe_log_event`` 用于生产业务路径。
     """
     try:
+        from src.logsystem.logger import _configured as _ls_configured
+
+        if _ls_configured is None:
+            return  # 未显式初始化 —— 保持被动，不产生任何全局副作用
         log_event(
             level,
             message,
@@ -169,6 +190,60 @@ def safe_log_event(
         pass
 
 
+def traced_step(step: str, *, summarize=None):
+    """通用步骤埋点装饰器（同步函数）。
+
+    场景全覆盖时对「每个场景的核心计算步骤」补埋点，用它避免把
+    try/except + 计时 + safe_log_event 这段样板抄 N 遍。
+
+    Args:
+        step: 步骤标识，如 ``"factor.bench"``、``"backtest.run"``。
+        summarize: 可选 ``(args, kwargs, result) -> dict``，抽取业务摘要字段；
+            抛异常时忽略（摘要失败不能影响埋点，更不能影响业务）。
+
+    用法::
+
+        @traced_step("factor.bench", summarize=lambda a, k, r: {"zoo": k.get("zoo")})
+        def run_bench(...): ...
+    """
+
+    def deco(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            t0 = time.monotonic()
+            try:
+                result = func(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - 记录后原样抛出
+                safe_log_event(
+                    logging.WARNING,
+                    f"{step}.failed",
+                    step=step,
+                    status="failed",
+                    error_code=type(exc).__name__,
+                    error_msg=str(exc)[:200],
+                    extra={"cost_ms": int((time.monotonic() - t0) * 1000)},
+                )
+                raise
+            extra = {"cost_ms": int((time.monotonic() - t0) * 1000)}
+            if summarize is not None:
+                try:
+                    extra.update(summarize(args, kwargs, result) or {})
+                except Exception:
+                    pass
+            safe_log_event(
+                logging.INFO,
+                f"{step}.success",
+                step=step,
+                status="success",
+                extra=extra,
+            )
+            return result
+
+        return wrapper
+
+    return deco
+
+
 __all__ = [
     "init_logging",
     "project_logger",
@@ -176,6 +251,7 @@ __all__ = [
     "current_business_id",
     "register_business_id_provider",
     "safe_log_event",
+    "traced_step",
     "log_call",
     "log_event",
     "log_business_event",

@@ -14,6 +14,7 @@ Tool execution:
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import contextvars
 import copy
 import json
@@ -905,6 +906,65 @@ from src.agent.tool_results import (  # noqa: E402
 )
 
 
+# --------------------------------------------------------------------------- #
+# Agent 会话级埋点（P2 / 场景全覆盖）
+# --------------------------------------------------------------------------- #
+# AgentLoop.run 是所有「自然语言驱动」场景（场景 1/2/3/4/5/7/8/9）的唯一顶层
+# 入口：CLI `run`、REST API send_message、Swarm 单节点都收敛到它。
+# run() 内已 bind_llm_session_id(session_id)，而 logsystem_bootstrap 注册的
+# business_id provider 正是读这个 ContextVar —— 因此 session 内的 LLM/工具/
+# 行情/交易日志会**自动**带上同一个 business_id，无需逐层透传。
+
+
+def _agent_log(
+    status: str,
+    session_id: str,
+    user_message: str,
+    t0: float,
+    result: Any = None,
+    error: BaseException | None = None,
+) -> None:
+    """Agent 会话埋点落盘（旁路，绝不抛异常）。
+
+    只记录用户输入的**长度**而非正文：用户可能把密钥、持仓等私有信息
+    粘进对话，落盘正文会扩大泄露面。业务链路还原依赖 session 内各层的
+    结构化埋点（LLM/工具/行情/交易）+ session_id 关联。
+    """
+    try:
+        from src.logsystem_bootstrap import safe_log_event
+
+        fields: Dict[str, Any] = {
+            "session_id": session_id or "",
+            "message_chars": len(user_message or ""),
+            "cost_ms": int((_time.monotonic() - t0) * 1000),
+        }
+        final_status: Optional[str] = None
+        if isinstance(result, dict):
+            final_status = result.get("status")
+            fields.update(
+                {
+                    "run_id": result.get("run_id"),
+                    "iterations": result.get("iterations"),
+                    "max_iterations": result.get("max_iterations"),
+                    "content_chars": len(result.get("content") or ""),
+                    "final_status": final_status,
+                    "reason": (str(result.get("reason") or "")[:200]) or None,
+                }
+            )
+        ok = status == "success" and final_status in (None, "success", "completed", "ok")
+        safe_log_event(
+            logging.INFO if ok else logging.WARNING,
+            f"agent.session.{status}",
+            step="agent.session",
+            status=status,
+            error_code=result.get("error_code") if isinstance(result, dict) else None,
+            error_msg=str(error)[:200] if error else None,
+            extra=fields,
+        )
+    except Exception:
+        pass
+
+
 class AgentLoop:
     """ReAct Agent core loop.
 
@@ -1088,8 +1148,28 @@ class AgentLoop:
             Execution result dict.
         """
         token = bind_llm_session_id(session_id)
+        _t0 = _time.monotonic()
+        # 一次会话 = 一条 trace：会话内的 LLM/工具/行情/交易日志共享
+        # trace_id/span_id，从而可依据日志还原完整业务链路（task4 维度 3）。
+        # 外层已显式 trace_scope 时保留其 business_id，否则回落 session_id；
+        # trace_scope 本身会继承外层 trace_id，不会另起一条。
         try:
-            return self._run_bound(user_message, history, session_id)
+            from src.logsystem import get_business_id as _ls_bid
+            from src.logsystem import trace_scope as _ls_trace_scope
+
+            _scope = _ls_trace_scope(business_id=_ls_bid() or session_id or None)
+        except Exception:
+            _scope = contextlib.nullcontext()
+        try:
+            with _scope:
+                _agent_log("started", session_id, user_message, _t0)
+                try:
+                    result = self._run_bound(user_message, history, session_id)
+                except Exception as exc:
+                    _agent_log("failed", session_id, user_message, _t0, error=exc)
+                    raise
+                _agent_log("success", session_id, user_message, _t0, result=result)
+                return result
         finally:
             # task3 自闭环：业务（一次研究会话）完成后，异步分析本次会话的
             # 日志并产出报告。仅在 logsystem 已初始化时触发，避免测试环境

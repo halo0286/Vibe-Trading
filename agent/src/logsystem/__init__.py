@@ -35,6 +35,8 @@ from .trace import (
     new_span,
     copy_trace_context,
     run_with_context,
+    register_business_id_resolver,
+    resolve_business_id,
 )
 from .logger import (
     get_logger,
@@ -64,6 +66,8 @@ ADVANCED_API = (
     # 兼容入口（历史项目在用，保留可导入）
     "log_business_event",
     # 底层 trace 控制
+    "register_business_id_resolver",
+    "resolve_business_id",
     "TraceContext",
     "get_trace_id",
     "get_span_id",

@@ -46,6 +46,36 @@ def get_business_id() -> Optional[str]:
     return _business_id.get()
 
 
+#: business_id 兜底解析器：contextvar 为空时按注册顺序尝试。
+#: 存在的意义：``log_business_event`` 是**所有**业务日志的唯一落盘路径，
+#: 若它只读 contextvar，则凡是没有显式 ``trace_scope`` 的场景
+#: （如 Agent 会话自动绑定的 session_id）都会写成空 business_id，
+#: 全链路追踪直接失效。把兜底能力下沉到 logsystem 内部后，
+#: 使用方无需在每处埋点外层手动包 trace_scope。
+_BUSINESS_ID_RESOLVERS: list = []
+
+
+def register_business_id_resolver(resolver) -> None:
+    """注册 business_id 兜底解析器（重复注册幂等）。"""
+    if resolver not in _BUSINESS_ID_RESOLVERS:
+        _BUSINESS_ID_RESOLVERS.append(resolver)
+
+
+def resolve_business_id() -> Optional[str]:
+    """解析 business_id：contextvar 优先，其次注册的兜底解析器。"""
+    bid = _business_id.get()
+    if bid:
+        return bid
+    for resolver in _BUSINESS_ID_RESOLVERS:
+        try:
+            value = resolver()
+        except Exception:
+            continue
+        if value:
+            return value
+    return None
+
+
 def get_trace_id() -> Optional[str]:
     return _trace_id.get()
 

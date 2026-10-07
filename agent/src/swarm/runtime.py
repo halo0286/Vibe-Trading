@@ -7,6 +7,7 @@ with cancellation and event callback support.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import random
 import shutil
@@ -20,7 +21,7 @@ from concurrent.futures import (
 )
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from src.config.accessor import get_env_config
 from src.config.schema import AgentConfig
@@ -248,7 +249,59 @@ def _task_definition_changed(
     return False
 
 
+def _swarm_log(status: str, run: Any, t0: float | None = None, error: BaseException | None = None) -> None:
+    """Swarm 编排埋点（旁路，绝不抛异常）。
+
+    补的是场景 4 的**编排层**：preset、run 生命周期、Agent/任务规模、
+    完成与失败任务数、token 累计。worker 内部另有 AgentLoop / LLM / 工具
+    各层埋点，二者通过 run_id 关联。
+
+    注意：Swarm 用 ThreadPoolExecutor / Thread 执行，contextvars 不会自动
+    传播到工作线程，因此编排日志的 business_id 由 _traced_execute_run 内的
+    trace_scope(run.id) 显式绑定。
+    """
+    try:
+        from src.logsystem_bootstrap import safe_log_event
+
+        tasks = list(getattr(run, "tasks", None) or [])
+        done = sum(
+            1 for t in tasks
+            if str(getattr(t, "status", "")).lower() in ("completed", "success", "done")
+        )
+        failed = sum(
+            1 for t in tasks
+            if str(getattr(t, "status", "")).lower() in ("failed", "error")
+        )
+        fields: dict = {
+            "run_id": str(getattr(run, "id", "")),
+            "preset": getattr(run, "preset_name", None),
+            "run_status": getattr(run, "status", None),
+            "agents": len(getattr(run, "agents", None) or []),
+            "tasks": len(tasks),
+            "tasks_completed": done,
+            "tasks_failed": failed,
+            "input_tokens": getattr(run, "total_input_tokens", None),
+            "output_tokens": getattr(run, "total_output_tokens", None),
+            "provider": getattr(run, "provider", None),
+            "model": getattr(run, "model", None),
+        }
+        if t0 is not None:
+            fields["cost_ms"] = int((time.monotonic() - t0) * 1000)
+        safe_log_event(
+            logging.INFO if status in ("started", "running", "success") else logging.WARNING,
+            f"swarm.{status}",
+            step="swarm.run",
+            status=status,
+            error_code=type(error).__name__ if error else None,
+            error_msg=str(error)[:200] if error else None,
+            extra=fields,
+        )
+    except Exception:
+        pass
+
+
 class SwarmRuntime:
+
     """Swarm DAG orchestration engine.
 
     Manages the full lifecycle of a swarm run: creation, scheduling, execution,
@@ -352,12 +405,13 @@ class SwarmRuntime:
                 self._live_callbacks[run.id] = live_callback
 
         thread = threading.Thread(
-            target=self._execute_run,
+            target=self._traced_execute_run,
             args=(run, cancel_event, include_shell_tools, resume_from),
             name=f"swarm-{run.id}",
             daemon=True,
         )
         thread.start()
+        _swarm_log("started", run)
 
         return run
 
@@ -421,6 +475,35 @@ class SwarmRuntime:
             data=data or {},
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
+
+    def _traced_execute_run(
+        self,
+        run: SwarmRun,
+        cancel_event: threading.Event,
+        include_shell_tools: bool = False,
+        resume_from: SwarmRun | None = None,
+    ) -> None:
+        """_execute_run 的埋点包装（在后台线程内执行）。
+
+        在**该线程内**绑定 trace_scope(business_id=run.id)，使编排日志
+        带上 business_id/trace_id；随后记录 started / success / failed
+        与整体耗时、任务成败数。日志失败绝不影响 swarm 执行。
+        """
+        _t0 = time.monotonic()
+        try:
+            from src.logsystem import trace_scope as _ls_trace_scope
+
+            scope = _ls_trace_scope(business_id=str(run.id))
+        except Exception:
+            scope = contextlib.nullcontext()
+        with scope:
+            _swarm_log("running", run, _t0)
+            try:
+                self._execute_run(run, cancel_event, include_shell_tools, resume_from)
+            except Exception as exc:
+                _swarm_log("failed", run, _t0, error=exc)
+                raise
+            _swarm_log("success", run, _t0)
 
     def _execute_run(
         self,

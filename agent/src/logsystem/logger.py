@@ -21,7 +21,12 @@ from typing import Any, Dict, Optional
 
 from .config import LogConfig
 from .masking import MaskFilter
-from .trace import get_business_id, get_span_id, get_trace_id
+from .trace import (
+    get_business_id,
+    get_span_id,
+    get_trace_id,
+    resolve_business_id,
+)
 
 
 # LogRecord 保留属性：无法通过 logging 的 extra 直接传递（会抛
@@ -184,7 +189,7 @@ class _BusinessFormatter(logging.Formatter):
         super().__init__(fmt, style="{")
 
     def format(self, record: logging.LogRecord) -> str:
-        bid = get_business_id()
+        bid = resolve_business_id()
         tid = get_trace_id()
         sid = get_span_id()
         # 允许记录时显式覆盖（extra 注入优先）
@@ -351,7 +356,7 @@ def log_business_event(
 ) -> None:
     """记录一条携带业务上下文的日志。"""
     ctx = {}
-    bid = get_business_id()
+    bid = resolve_business_id()
     if bid is not None:
         ctx["business_id"] = bid
     tid = get_trace_id()
