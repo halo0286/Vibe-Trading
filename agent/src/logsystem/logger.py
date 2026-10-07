@@ -354,8 +354,19 @@ def log_business_event(
     error_msg: Optional[str] = None,
     extra: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """记录一条携带业务上下文的日志。"""
-    ctx = {}
+    """记录一条携带业务上下文的日志。
+
+    契约：``extra`` **不得覆盖规范字段**（business_id / trace_id / span_id /
+    step / status / error_code / error_msg）。因此先铺 extra，再把规范字段
+    写在最后。历史缺陷：先写规范字段再 ``ctx.update(extra)``，导致载荷自带的
+    ``{"status": ...}`` 顶掉事件状态 —— 实测 ``trading.get_account`` 认证失败
+    落盘为 ``status=not_authorized``、成功的只读调用落盘为 ``status=ok``，
+    分析器按 status 聚合的 error_count/status_distribution 全部失真。
+    """
+    ctx: Dict[str, Any] = {}
+    if extra:
+        ctx.update(extra)
+    # —— 规范字段最后写入，extra 无权覆盖 ——
     bid = resolve_business_id()
     if bid is not None:
         ctx["business_id"] = bid
@@ -373,8 +384,6 @@ def log_business_event(
         ctx["error_code"] = error_code
     if error_msg is not None:
         ctx["error_msg"] = error_msg
-    if extra:
-        ctx.update(extra)
     # 高频限流：按 step 维度限流
     global _configured
     rl = getattr(_configured, "rate_limiter", None) if _configured else None

@@ -16,7 +16,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from src.logsystem import (
     LogConfig,
@@ -191,6 +191,44 @@ def safe_log_event(
         pass
 
 
+#: 明确表示「业务成功」的状态值。**必须用允许清单，而不是否定清单。**
+#:
+#: 历史缺陷：埋点用 3~4 个词的否定清单（error/failed/rejected）判断成败，
+#: 于是 `blocked`（kill-switch / mandate 拒单）、`not_authorized`（OAuth 过期）、
+#: `timeout`、`budget_exceeded`、`quote_not_bounded`、`empty`、`fail`、`500`
+#: 全部被记成 success —— 最安全敏感的熔断拒单在日志里读起来是成功的实盘下单。
+SUCCESS_VERDICTS = frozenset({"success", "ok", "completed", "done"})
+
+
+def business_outcome(result: Any) -> str:
+    """判定业务成败，返回 ``"success"`` 或 ``"failed"``（**唯一**共享分类器）。
+
+    全项目只有这一处分类逻辑，避免各埋点各写一份否定清单而漂移。
+
+    规则：
+    - 非 dict，或 dict 中没有 ``status`` 字段：调用未抛异常 → ``success``。
+    - 有 ``status`` 字段：仅当取值命中 :data:`SUCCESS_VERDICTS` 才算
+      ``success``，其余一律 ``failed``。
+    """
+    if not isinstance(result, dict):
+        return "success"
+    raw = result.get("status")
+    if raw is None:
+        return "success"
+    return "success" if str(raw).strip().lower() in SUCCESS_VERDICTS else "failed"
+
+
+def result_error(result: Any) -> tuple:
+    """从错误载荷抽取 ``(error_code, error_msg)``，让失败记录带上原因。"""
+    if not isinstance(result, dict):
+        return None, None
+    code = result.get("error_code") or result.get("status")
+    if code is not None:
+        code = str(code)
+    msg = result.get("error") or result.get("reason") or result.get("error_msg") or ""
+    return code, (str(msg)[:200] or None)
+
+
 def traced_step(step: str, *, summarize=None):
     """通用步骤埋点装饰器（同步函数）。
 
@@ -232,25 +270,20 @@ def traced_step(step: str, *, summarize=None):
                 except Exception:
                     pass
             # 返回错误载荷 ≠ 成功：这类函数（alpha bench / 交易查询等）以
-            # dict 形式返回 {"status": "error", ...} 而不抛异常。若一律记
-            # success，日志会把"业务失败"统计成"业务成功"，使按 status 聚合的
-            # 分析和告警全部失真。
-            status = "success"
-            error_code = None
-            error_msg = None
-            if isinstance(result, dict):
-                verdict = str(result.get("status", "")).strip().lower()
-                if verdict in ("error", "failed", "rejected", "failure"):
-                    status = "failed"
-                    error_code = str(result.get("error_code") or verdict)
-                    error_msg = str(result.get("error") or result.get("reason") or "")[:200]
+            # dict 形式返回 {"status": ...} 而不抛异常。分类必须走共享的
+            # **允许清单**：否定清单会漏掉 blocked / not_authorized / timeout
+            # 等真实失败词，把业务失败统计成成功。
+            status = business_outcome(result)
+            error_code, error_msg = (None, None)
+            if status == "failed":
+                error_code, error_msg = result_error(result)
             safe_log_event(
                 logging.INFO if status == "success" else logging.WARNING,
                 f"{step}.{status}",
                 step=step,
                 status=status,
                 error_code=error_code,
-                error_msg=error_msg or None,
+                error_msg=error_msg,
                 extra=extra,
             )
             return result
@@ -280,6 +313,9 @@ __all__ = [
     "register_business_id_provider",
     "safe_log_event",
     "traced_step",
+    "business_outcome",
+    "SUCCESS_VERDICTS",
+    "result_error",
     "drain_analysis",
     "log_call",
     "log_event",

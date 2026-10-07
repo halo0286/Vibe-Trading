@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import traceback
 from abc import ABC, abstractmethod
@@ -59,22 +60,41 @@ def _mask_tool_params(params: Dict[str, Any]) -> Dict[str, Any]:
         return {"<redacted>": f"{len(params)} params"}
 
 
-def _tool_outcome(result: Any) -> str:
-    """从工具返回的 JSON 字符串判定业务成败（工具不抛异常也可能业务失败）。
+#: 超过该长度的工具结果不做全量解析：仅为判定成败而解析多 MB 载荷
+#: 实测代价过高（1.15MB→3ms、64MB→351ms）。
+_OUTCOME_PARSE_LIMIT = 64 * 1024
 
-    返回 ``"success"`` 或 ``"failed"``。解析失败一律按 success 处理 ——
-    埋点分类不能反过来影响业务判定，也不能因解析问题制造假告警。
+_STATUS_IN_TEXT = re.compile(r'"status"\s*:\s*"([A-Za-z_][A-Za-z0-9_]*)"')
+
+
+def _tool_outcome(result: Any) -> str:
+    """判定工具调用业务成败，返回 ``"success"`` / ``"failed"``。
+
+    复用 logsystem 的**共享允许清单**（``business_outcome``），不再自写一份
+    否定清单 —— 历史缺陷是只认 error/failed/rejected/failure 四个词，于是
+    ``timeout`` / ``budget_exceeded`` / ``quote_not_bounded`` / ``empty`` /
+    ``fail`` / ``500`` 全部被记成 success。
+
+    性能：结果不超过 64 KiB 时精确解析；超过时只对**有界前缀**做尽力判定
+    （与落盘时使用的截断窗口一致），避免为读一个字段解析整个大载荷。
+    解析失败一律按 success 处理 —— 埋点分类绝不能反过来影响业务判定。
     """
     try:
-        if not isinstance(result, str):
-            return "success"
-        payload = json.loads(result)
-        if isinstance(payload, dict):
-            verdict = str(payload.get("status", "")).strip().lower()
-            if verdict in ("error", "failed", "rejected", "failure"):
-                return "failed"
+        from src.logsystem_bootstrap import SUCCESS_VERDICTS, business_outcome
+    except Exception:  # pragma: no cover - 引导失败时退回保守判定
+        return "success"
+
+    if not isinstance(result, str):
+        return "success"
+    try:
+        if len(result) <= _OUTCOME_PARSE_LIMIT:
+            return business_outcome(json.loads(result))
     except Exception:
-        pass
+        return "success"
+    # 超大结果：有界前缀尽力判定
+    match = _STATUS_IN_TEXT.search(result[:_OUTCOME_PARSE_LIMIT])
+    if match and match.group(1).strip().lower() not in SUCCESS_VERDICTS:
+        return "failed"
     return "success"
 
 

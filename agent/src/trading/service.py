@@ -9,7 +9,7 @@ import time as _time
 from typing import Any
 
 from src.trading.profiles import list_profiles, profile_by_id
-from src.logsystem_bootstrap import traced_step
+from src.logsystem_bootstrap import business_outcome, result_error, traced_step
 from src.trading.types import TradingProfile
 
 RUNNER_CAPABILITY = "runner.manage.requires_mandate"
@@ -219,8 +219,10 @@ def check_connection(profile_id: str | None = None, **overrides: Any) -> dict[st
 
 
 #: 只读操作允许落盘的字段（绝不记录金额/账号等财务隐私）
+#: 注意：这里**不能**用 "status" 作为键名 —— 会覆盖日志的规范 status 字段。
+#: 载荷自身的状态改名 read_status；并保留 reason 作为失败原因。
 _READ_SUMMARY_KEYS = ("profile_id", "connector", "environment", "transport",
-                      "status", "error", "source", "symbol", "interval")
+                      "source", "symbol", "interval", "reason")
 _READ_COUNT_KEYS = ("positions", "orders", "accounts", "history", "history_deals",
                     "items", "rows", "data", "cash_flow", "financials")
 
@@ -233,6 +235,10 @@ def _read_summary(args: tuple, kwargs: dict, result: Any) -> dict:
     """
     out: dict = {}
     if isinstance(result, dict):
+        if "status" in result:
+            value = result.get("status")
+            if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                out["read_status"] = str(value)[:80]
         for key in _READ_SUMMARY_KEYS:
             value = result.get(key)
             if isinstance(value, (str, int, float, bool)) and not isinstance(value, bool):
@@ -751,8 +757,9 @@ def _order_classification(connector: str, symbol: str):
 # --------------------------------------------------------------------------- #
 
 #: 允许落盘的订单字段白名单（防止把 broker 返回中的账号/密钥等敏感信息写进日志）
+#: 同上：不得使用 "status"（会覆盖规范字段），改用 order_status；补 reason。
 _ORDER_SUMMARY_KEYS = (
-    "order_id", "client_order_id", "status", "symbol", "side", "quantity",
+    "order_id", "client_order_id", "order_status", "symbol", "side", "quantity",
     "filled_quantity", "average_price", "limit_price", "order_type",
     "time_in_force", "error", "profile_id", "connector", "environment",
     "transport",
@@ -767,11 +774,16 @@ def _order_summary(result: Any) -> dict[str, Any]:
     """只取白名单字段，且只保留可安全序列化的标量。"""
     if not isinstance(result, dict):
         return {}
-    return {
+    out = {
         k: result[k]
         for k in _ORDER_SUMMARY_KEYS
         if k in result and isinstance(result[k], (str, int, float, bool, type(None)))
     }
+    if "status" in result:
+        value = result.get("status")
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            out["order_status"] = str(value)[:80]
+    return out
 
 
 def _trading_log(step: str, status: str, *, cost_ms: int | None = None,
@@ -819,12 +831,15 @@ def _traced_order(step: str) -> Any:
                 )
                 raise
             summary = _order_summary(result)
-            status = "success"
-            if isinstance(result, dict) and str(result.get("status", "")).lower() in (
-                "error", "failed", "rejected",
-            ):
-                status = "rejected"
-            _trading_log(step, status, cost_ms=_ms(t0), extra=summary)
+            # 允许清单分类：blocked（kill-switch/mandate 拒单）、not_authorized、
+            # timeout、rejected 等一律记 failed —— 此前否定清单把它们记成
+            # success，使熔断拒单在日志里读起来像成功的实盘下单。
+            status = business_outcome(result)
+            error_code = error_msg = None
+            if status == "failed":
+                error_code, error_msg = result_error(result)
+            _trading_log(step, status, cost_ms=_ms(t0),
+                         error_code=error_code, error_msg=error_msg, extra=summary)
             return result
 
         return wrapper
