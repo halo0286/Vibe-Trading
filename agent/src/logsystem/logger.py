@@ -380,6 +380,17 @@ def configure(config: Optional[LogConfig] = None) -> GlobalLogger:
     return _configured
 
 
+def logsystem_active() -> bool:
+    """日志系统是否已初始化。
+
+    供埋点做**短路**：日志未初始化时（测试、库用法、未接日志的宿主），
+    记录必然被丢弃，装饰器就不该再去算耗时、合并默认参数、遍历 prompt、
+    构造 extra —— 那些工作在日志关闭时纯属浪费（实测 fetch_market_data
+    端到端 +9~11%）。
+    """
+    return _configured is not None
+
+
 def get_logger(name: Optional[str] = None, config: Optional[LogConfig] = None) -> logging.Logger:
     """获取日志器；未配置时使用默认配置自动初始化。"""
     global _configured

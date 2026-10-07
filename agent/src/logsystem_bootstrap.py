@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 from src.logsystem import (
     LogConfig,
+    logsystem_active,
     configure,
     get_logger,
     get_business_id,
@@ -265,6 +266,9 @@ def traced_step(step: str, *, summarize=None):
     def deco(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
+            # 短路：日志未初始化时不必算耗时、调 summarize、构造 extra
+            if not logsystem_active():
+                return func(*args, **kwargs)
             t0 = time.monotonic()
             try:
                 result = func(*args, **kwargs)
@@ -328,6 +332,7 @@ __all__ = [
     "current_business_id",
     "register_business_id_provider",
     "safe_log_event",
+    "logsystem_active",
     "traced_step",
     "business_outcome",
     "safe_str",

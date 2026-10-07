@@ -326,6 +326,20 @@ def _parse_dsml_tool_calls(content: Any) -> list[ToolCallRequest]:
     return tool_calls
 
 
+def _logsystem_active() -> bool:
+    """日志系统是否已初始化（导入失败按不可用处理）。
+
+    供装饰器**短路**：日志未初始化时记录必然被丢弃，不应再做埋点工作。
+    模块导入由 Python 缓存，这里是廉价的字典查找。
+    """
+    try:
+        from src.logsystem import logsystem_active
+
+        return logsystem_active()
+    except Exception:
+        return False
+
+
 def _safe_str(value: Any, limit: int = 200) -> str:
     """安全转字符串，绝不抛异常。
 
@@ -401,6 +415,9 @@ def _traced_llm_call(func: Callable) -> Callable:
 
     @functools.wraps(func)
     def wrapper(self, messages, *args, **kwargs):
+        # 短路：日志未初始化时不必遍历 messages 统计 prompt 规模
+        if not _logsystem_active():
+            return func(self, messages, *args, **kwargs)
         t0 = _time.monotonic()
         n_msg, n_chars = _prompt_shape(messages)
         base: Dict[str, Any] = {

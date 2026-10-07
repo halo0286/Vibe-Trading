@@ -79,6 +79,10 @@ def _traced_fetch(func: Callable) -> Callable:
 
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        # 短路：日志未初始化时记录必然被丢弃，不必再算耗时/合并默认参数/
+        # 扫描结果字典（实测本装饰器曾使 fetch_market_data 端到端 +9~11%）。
+        if not _logsystem_active():
+            return func(*args, **kwargs)
         t0 = _time.monotonic()
         try:
             result = func(*args, **kwargs)
@@ -91,6 +95,20 @@ def _traced_fetch(func: Callable) -> Callable:
     return wrapper
 
 
+def _logsystem_active() -> bool:
+    """日志系统是否已初始化（导入失败按不可用处理）。
+
+    供装饰器**短路**：日志未初始化时记录必然被丢弃，不应再做埋点工作。
+    模块导入由 Python 缓存，这里是廉价的字典查找。
+    """
+    try:
+        from src.logsystem import logsystem_active
+
+        return logsystem_active()
+    except Exception:
+        return False
+
+
 def _effective_args(
     func: Callable, args: tuple[Any, ...], kwargs: dict[str, Any],
 ) -> dict[str, Any]:
@@ -100,11 +118,21 @@ def _effective_args(
     日志无法反映真实取数口径。
     """
     try:
-        bound = inspect.signature(func).bind(*args, **kwargs)
+        bound = _signature_of(func).bind(*args, **kwargs)
         bound.apply_defaults()
         return dict(bound.arguments)
     except Exception:
         return dict(kwargs)
+
+
+@functools.lru_cache(maxsize=None)
+def _signature_of(func: Callable):
+    """缓存 ``inspect.signature`` 结果。
+
+    ``inspect.signature`` 单次约 9~13 µs 且**不会**返回同一对象
+    （``signature(f) is signature(f)`` 为 False），此前每次取数都重算。
+    """
+    return inspect.signature(func)
 
 DEFAULT_MAX_ROWS = 250
 

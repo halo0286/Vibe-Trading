@@ -39,6 +39,7 @@ from .trace import (
     resolve_business_id,
 )
 from .logger import (
+    logsystem_active,
     get_logger,
     configure,
     GlobalLogger,
@@ -63,6 +64,7 @@ CORE_API = (
 
 #: 高级 API —— 完全可导入，供二次开发/测试使用，不进入 ``__all__``。
 ADVANCED_API = (
+    "logsystem_active",   # 埋点短路：日志未初始化时跳过记录工作
     # 兼容入口（历史项目在用，保留可导入）
     "log_business_event",
     # 底层 trace 控制
