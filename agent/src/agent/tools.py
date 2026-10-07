@@ -59,6 +59,25 @@ def _mask_tool_params(params: Dict[str, Any]) -> Dict[str, Any]:
         return {"<redacted>": f"{len(params)} params"}
 
 
+def _tool_outcome(result: Any) -> str:
+    """从工具返回的 JSON 字符串判定业务成败（工具不抛异常也可能业务失败）。
+
+    返回 ``"success"`` 或 ``"failed"``。解析失败一律按 success 处理 ——
+    埋点分类不能反过来影响业务判定，也不能因解析问题制造假告警。
+    """
+    try:
+        if not isinstance(result, str):
+            return "success"
+        payload = json.loads(result)
+        if isinstance(payload, dict):
+            verdict = str(payload.get("status", "")).strip().lower()
+            if verdict in ("error", "failed", "rejected", "failure"):
+                return "failed"
+    except Exception:
+        pass
+    return "success"
+
+
 def _log_tool_call(
     name: str,
     params: Dict[str, Any],
@@ -266,7 +285,14 @@ class ToolRegistry:
                 "error": str(exc),
             }, ensure_ascii=False)
         # task3: 业务日志覆盖 —— 记录出参/耗时
-        _log_tool_call(name, params, _started, "success", result=_result)
+        #
+        # 工具以 JSON 字符串返回业务结果，**不抛异常**也可能表示业务失败：
+        # 例如 alpha_zoo 返回 {"status": "error", "error": "..."}。
+        # 早期实现无条件记 success，会把业务失败统计成成功，使按 status
+        # 聚合的分析/告警失真（task4 维度 2/4 会直接暴露这一点）。
+        _log_tool_call(
+            name, params, _started, _tool_outcome(_result), result=_result
+        )
         return _result
 
     @property

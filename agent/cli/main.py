@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
 import sys
 import threading
 import time
@@ -1476,6 +1477,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     """
     raw_argv = list(sys.argv[1:] if argv is None else argv)
 
+    # task2 logsystem：CLI 是场景 1/2/3/4/5/6/7/8/9/10/11 的主要入口
+    # （`run` / `alpha` / `connector` / `channels` …）。此前只有
+    # api_server 与 mcp_server 调用 init_logging()，CLI 完全未初始化日志系统，
+    # 导致 CLI 触发的业务**不产生任何日志**（task4 的文档化工作流恰好都用 CLI）。
+    # 这里与其它两个入口保持一致：显式初始化，失败不影响命令执行。
+    try:
+        from src.logsystem_bootstrap import init_logging
+
+        init_logging()
+    except Exception:
+        pass
+
     # One-time move of pre-#904 code-relative state into the runtime root.
     # A failed migration must never block the CLI.
     try:
@@ -1513,6 +1526,29 @@ def main(argv: Optional[list[str]] = None) -> int:
             style=Theme.danger,
         )
         return 2
+
+    # 为**一次性命令**注入唯一 business_id / trace_id。
+    #
+    # 背景：除 `run` 之外的 CLI 业务命令（`alpha bench` / `connector account` /
+    # `channels …`）不经过 AgentLoop，而只有 AgentLoop 会绑定 session_id；
+    # 若不在 CLI 层注入，这些命令产生的业务日志 business_id 全为空，
+    # 无法按业务关联（task4 维度 3「业务日志是否携带 business_id」）。
+    #
+    # 长驻服务（serve / mcp / dev）除外：它们必须按请求/会话各自取 id，
+    # 不能在进程级固定一个 business_id。
+    # 允许用 VIBE_BUSINESS_ID 显式指定（便于验证脚本注入已知 id）。
+    if raw_argv and raw_argv[0] not in {"serve", "mcp", "dev"}:
+        try:
+            import uuid as _uuid
+
+            from src.logsystem import set_trace_context
+
+            set_trace_context(
+                business_id=(os.environ.get("VIBE_BUSINESS_ID") or "").strip()
+                or f"cli-{_uuid.uuid4().hex[:12]}"
+            )
+        except Exception:
+            pass
 
     return int(_legacy.main(raw_argv))
 

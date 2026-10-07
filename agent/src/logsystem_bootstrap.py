@@ -230,11 +230,26 @@ def traced_step(step: str, *, summarize=None):
                     extra.update(summarize(args, kwargs, result) or {})
                 except Exception:
                     pass
+            # 返回错误载荷 ≠ 成功：这类函数（alpha bench / 交易查询等）以
+            # dict 形式返回 {"status": "error", ...} 而不抛异常。若一律记
+            # success，日志会把"业务失败"统计成"业务成功"，使按 status 聚合的
+            # 分析和告警全部失真。
+            status = "success"
+            error_code = None
+            error_msg = None
+            if isinstance(result, dict):
+                verdict = str(result.get("status", "")).strip().lower()
+                if verdict in ("error", "failed", "rejected", "failure"):
+                    status = "failed"
+                    error_code = str(result.get("error_code") or verdict)
+                    error_msg = str(result.get("error") or result.get("reason") or "")[:200]
             safe_log_event(
-                logging.INFO,
-                f"{step}.success",
+                logging.INFO if status == "success" else logging.WARNING,
+                f"{step}.{status}",
                 step=step,
-                status="success",
+                status=status,
+                error_code=error_code,
+                error_msg=error_msg or None,
                 extra=extra,
             )
             return result
