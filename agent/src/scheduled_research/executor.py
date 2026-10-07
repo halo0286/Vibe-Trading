@@ -191,6 +191,11 @@ def _day_matches(dt: date, doms: set[int] | None, months: set[int] | None, dows:
     return day_of_month_matches and day_of_week_matches
 
 
+
+def _enum_value(value):
+    """把 (str, Enum) 之类的状态取成裸值，避免落盘成 ``JobStatus.PENDING``。"""
+    return getattr(value, "value", value)
+
 def _sched_log(status: str, fields: dict, t0: float | None = None,
                error: BaseException | None = None) -> None:
     """定时研究调度埋点（场景 10 的自动化触发环节，旁路且绝不抛异常）。
@@ -374,11 +379,36 @@ class ScheduledResearchExecutor:
                     "consecutive_failures": getattr(job, "consecutive_failures", None),
                 }, _t0, exc)
             else:
-                _sched_log("job_done", {
-                    "job_id": str(getattr(job, "id", "")),
-                    "schedule": getattr(job, "schedule", None),
-                    "job_status": getattr(job, "status", None),
-                }, _t0)
+                # _run_job 会**内部吞掉**派发失败（自增 consecutive_failures、
+                # 置 failure_kind="dispatch"、然后 return），所以"没抛异常"
+                # 不等于"跑成功"。此前无条件记 job_done(INFO)，于是派发失败
+                # 在日志里读起来是一次正常完成，且连 consecutive_failures /
+                # last_error 都没有 —— 正是本埋点承诺要回答的问题。
+                latest = None
+                try:
+                    latest = self._store.load().get(getattr(job, "id", None))
+                except Exception:
+                    latest = None
+                snap = latest if latest is not None else job
+                failure_kind = getattr(snap, "failure_kind", None)
+                last_error = getattr(snap, "last_error", None)
+                dispatch_failed = bool(last_error) or (
+                    failure_kind not in (None, "", "none", "None")
+                )
+                fields = {
+                    "job_id": str(getattr(snap, "id", "")),
+                    "schedule": getattr(snap, "schedule", None),
+                    "job_status": _enum_value(getattr(snap, "status", None)),
+                }
+                if dispatch_failed:
+                    _sched_log("job_failed", dict(
+                        fields,
+                        failure_kind=failure_kind,
+                        consecutive_failures=getattr(snap, "consecutive_failures", None),
+                        error_msg=str(last_error)[:200] if last_error else None,
+                    ), _t0)
+                else:
+                    _sched_log("job_done", fields, _t0)
 
         # The sweep is what makes delivery correct; the event hook only makes
         # it prompt. A briefing whose hook was lost to a restart, a crash

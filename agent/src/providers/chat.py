@@ -326,6 +326,21 @@ def _parse_dsml_tool_calls(content: Any) -> list[ToolCallRequest]:
     return tool_calls
 
 
+def _safe_str(value: Any, limit: int = 200) -> str:
+    """安全转字符串，绝不抛异常。
+
+    埋点直接 ``str(exc)`` 会让重写了 ``__str__`` 的异常**顶替掉真正的业务
+    异常**；埋点必须只能旁路。
+    """
+    try:
+        return str(value)[:limit]
+    except Exception:
+        try:
+            return type(value).__name__
+        except Exception:
+            return "<unstringifiable>"
+
+
 def _prompt_shape(messages: Any) -> tuple[int, int]:
     """Prompt 规模 ``(消息条数, 总字符数)``。
 
@@ -360,12 +375,16 @@ def _llm_log(status: str, fields: Dict[str, Any], cost_ms: int) -> None:
         from src.logsystem_bootstrap import safe_log_event
 
         err = fields.pop("error_type", None)
+        # error_msg 此前只留在 extra 里，固定列 error_msg 恒为空（靠 extra 兜底
+        # 很脆弱）。显式取出走规范字段。
+        err_msg = fields.pop("error_msg", None)
         safe_log_event(
             logging.INFO if status == "success" else logging.WARNING,
             f"llm.{status}",
             step="llm.call",
             status=status,
             error_code=err,
+            error_msg=err_msg,
             extra={"cost_ms": cost_ms, **fields},
         )
     except Exception:
@@ -395,27 +414,35 @@ def _traced_llm_call(func: Callable) -> Callable:
         except Exception as exc:
             _llm_log(
                 "failed",
-                dict(base, error_type=type(exc).__name__, error_msg=str(exc)[:200]),
+                dict(base, error_type=type(exc).__name__, error_msg=_safe_str(exc, 200)),
                 int((_time.monotonic() - t0) * 1000),
             )
             raise
         cost_ms = int((_time.monotonic() - t0) * 1000)
-        usage = getattr(resp, "usage_metadata", None) or {}
-        _llm_log(
-            "success",
-            dict(
-                base,
-                response_model=getattr(resp, "response_model", None),
-                finish_reason=getattr(resp, "finish_reason", None),
-                tool_calls=len(getattr(resp, "tool_calls", None) or ()),
-                content_chars=len(getattr(resp, "content", None) or ""),
-                input_tokens=usage.get("input_tokens"),
-                output_tokens=usage.get("output_tokens"),
-                total_tokens=usage.get("total_tokens"),
-                content_filtered=bool(getattr(resp, "content_filter_triggered", False)),
-            ),
-            cost_ms,
-        )
+        # 整个后置块必须在保护之内：埋点绝不能让**成功**的 provider 调用变成
+        # 异常。此前 usage_metadata 非 dict（如 list）时 usage.get() 抛
+        # AttributeError 并逸出装饰器。
+        try:
+            usage = getattr(resp, "usage_metadata", None)
+            if not isinstance(usage, dict):
+                usage = {}
+            _llm_log(
+                "success",
+                dict(
+                    base,
+                    response_model=getattr(resp, "response_model", None),
+                    finish_reason=getattr(resp, "finish_reason", None),
+                    tool_calls=len(getattr(resp, "tool_calls", None) or ()),
+                    content_chars=len(getattr(resp, "content", None) or ""),
+                    input_tokens=usage.get("input_tokens"),
+                    output_tokens=usage.get("output_tokens"),
+                    total_tokens=usage.get("total_tokens"),
+                    content_filtered=bool(getattr(resp, "content_filter_triggered", False)),
+                ),
+                cost_ms,
+            )
+        except Exception:
+            pass
         return resp
 
     return wrapper

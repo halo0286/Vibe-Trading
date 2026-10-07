@@ -931,7 +931,7 @@ def _agent_log(
     结构化埋点（LLM/工具/行情/交易）+ session_id 关联。
     """
     try:
-        from src.logsystem_bootstrap import safe_log_event
+        from src.logsystem_bootstrap import safe_log_event, safe_str
 
         fields: Dict[str, Any] = {
             "session_id": session_id or "",
@@ -952,13 +952,26 @@ def _agent_log(
                 }
             )
         ok = status == "success" and final_status in (None, "success", "completed", "ok")
+        # 关键：`run()` 在 `_run_bound` **正常返回**时也调用 _agent_log("success")，
+        # 而 `_run_bound` 自己捕获异常并返回 {"status": "failed", ...}，所以
+        # except 分支对真实失败基本是死代码。若把入参 status 直接落盘，失败会话
+        # 会写成 `message=agent.session.success status=success final_status=failed`
+        # —— 分析器据此报 status=success / error_count=0，**失败会话完全隐形**
+        # （与 C-3 同一类缺陷）。
+        # "started" 表示开始，保持原样，且是正常事件（不应记为 WARNING）。
+        if status == "started":
+            emitted, level = "started", logging.INFO
+        elif ok:
+            emitted, level = "success", logging.INFO
+        else:
+            emitted, level = "failed", logging.WARNING
         safe_log_event(
-            logging.INFO if ok else logging.WARNING,
-            f"agent.session.{status}",
+            level,
+            f"agent.session.{emitted}",
             step="agent.session",
-            status=status,
+            status=emitted,
             error_code=result.get("error_code") if isinstance(result, dict) else None,
-            error_msg=str(error)[:200] if error else None,
+            error_msg=safe_str(error, 200) if error is not None else None,
             extra=fields,
         )
     except Exception:

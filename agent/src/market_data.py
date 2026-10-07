@@ -28,16 +28,22 @@ def _fetch_log(
 ) -> None:
     """行情加载埋点落盘（旁路，绝不抛异常）。"""
     try:
-        from src.logsystem_bootstrap import safe_log_event
+        from src.logsystem_bootstrap import safe_log_event, safe_str
 
+        # 真实返回形态是 {symbol: DataFrame} 外加**顶层** "_unresolved": [codes]
+        # （见 fetch_market_data 的 `results["_unresolved"] = unresolved`）。
+        # 历史实现按 `{symbol: {"_unresolved": ...}}` 逐项找 dict，永远匹配不到：
+        # unresolved_count 恒 0、WARNING 分支是死代码，而且 resolved 把
+        # _unresolved / _provenance 这类**元数据键**也算成了已解析标的。
         resolved = 0
         unresolved: list[str] = []
         if isinstance(result, dict):
-            for code, payload in result.items():
-                if isinstance(payload, dict) and payload.get("_unresolved"):
-                    unresolved.append(str(code))
-                else:
-                    resolved += 1
+            raw = result.get("_unresolved") or []
+            if isinstance(raw, (list, tuple, set)):
+                unresolved = [str(c) for c in raw]
+            elif raw:
+                unresolved = [str(raw)]
+            resolved = sum(1 for code in result if not str(code).startswith("_"))
         level = logging.INFO
         if status != "success" or unresolved:
             level = logging.WARNING
@@ -47,7 +53,7 @@ def _fetch_log(
             step="market_data.fetch",
             status=status,
             error_code=type(error).__name__ if error else None,
-            error_msg=str(error)[:200] if error else None,
+            error_msg=safe_str(error, 200) if error is not None else None,
             extra={
                 "source": kwargs.get("source"),
                 "interval": kwargs.get("interval"),

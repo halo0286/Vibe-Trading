@@ -9,7 +9,7 @@ import time as _time
 from typing import Any
 
 from src.trading.profiles import list_profiles, profile_by_id
-from src.logsystem_bootstrap import business_outcome, result_error, traced_step
+from src.logsystem_bootstrap import business_outcome, result_error, safe_str, traced_step
 from src.trading.types import TradingProfile
 
 RUNNER_CAPABILITY = "runner.manage.requires_mandate"
@@ -827,7 +827,7 @@ def _traced_order(step: str) -> Any:
             except Exception as exc:  # noqa: BLE001 - 记录后原样抛出
                 _trading_log(
                     step, "failed", cost_ms=_ms(t0),
-                    error_code=type(exc).__name__, error_msg=str(exc)[:200],
+                    error_code=type(exc).__name__, error_msg=safe_str(exc, 200),
                 )
                 raise
             summary = _order_summary(result)

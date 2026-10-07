@@ -30,6 +30,17 @@ logger = logging.getLogger(__name__)
 # 此前场景 10「IM 推送」是唯一完全无埋点的场景。
 
 
+
+def _hash_id(value: Any) -> str:
+    """把会话/用户标识转成不可逆短哈希（PII 最小化）。"""
+    try:
+        raw = str(value or "")
+    except Exception:
+        return ""
+    if not raw:
+        return ""
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:12]
+
 def _channel_kind(msg: Any) -> str:
     """归类出站消息类型，便于按类型统计推送成功率。"""
     md = getattr(msg, "metadata", None) or {}
@@ -67,7 +78,10 @@ def _channel_log(
             error_msg=str(error)[:200] if error else None,
             extra={
                 "channel": getattr(msg, "channel", None),
-                "chat_id": str(getattr(msg, "chat_id", ""))[:64],
+                # PII：chat_id 在部分渠道就是手机号（如 WhatsApp 的
+                # <phone>@s.whatsapp.net）。只落盘**不可逆短哈希**，
+                # 既不泄露号码，又能在同一会话内做关联。
+                "chat_id_hash": _hash_id(getattr(msg, "chat_id", "")),
                 "kind": _channel_kind(msg),
                 "content_chars": len(getattr(msg, "content", None) or ""),
                 "attempts": attempts,

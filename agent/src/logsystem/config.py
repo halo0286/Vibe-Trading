@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+import logging
 import os
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -132,11 +134,13 @@ class LogConfig:
 
     @classmethod
     def for_test(cls, log_dir: Optional[str] = None, **overrides: object) -> "LogConfig":
-        """测试档：不污染终端、不跑分析、不清理文件，目录默认隔离。"""
-        if log_dir is None:
-            import tempfile
+        """测试档：不污染终端、不跑分析、不清理文件，目录默认隔离。
 
-            log_dir = tempfile.mkdtemp(prefix="logsystem_test_")
+        默认目录是**进程内复用**的：历史实现对每次调用都 ``mkdtemp()``，
+        反复构造配置会持续泄漏临时目录（retention_days=0 也不会清理它们）。
+        """
+        if log_dir is None:
+            log_dir = _shared_test_dir()
         cfg = cls(
             log_dir=log_dir,
             level="WARNING",
@@ -174,7 +178,18 @@ class LogConfig:
         在其之上覆盖。
         """
         profile = os.getenv("LOG_PROFILE")
-        cfg = cls.for_profile(profile) if profile else cls()
+        if profile:
+            try:
+                cfg = cls.for_profile(profile)
+            except ValueError:
+                # 部署时环境变量拼错不应导致**启动失败**：回落默认档并告警。
+                logging.getLogger(__name__).warning(
+                    "未知 LOG_PROFILE=%r，回落默认配置档（可选：dev/prod/test）",
+                    profile,
+                )
+                cfg = cls()
+        else:
+            cfg = cls()
         if os.getenv("LOG_DIR"):
             cfg.log_dir = os.environ["LOG_DIR"]
         if os.getenv("LOG_ROTATION_BYTES"):
@@ -192,11 +207,37 @@ class LogConfig:
         return p
 
 
+_TEST_DIR_CACHE: Dict[str, str] = {}
+
+
+def _shared_test_dir() -> str:
+    """进程内共享的测试日志目录（只创建一次，退出时清理）。"""
+    cached = _TEST_DIR_CACHE.get("dir")
+    if cached:
+        return cached
+    import atexit
+    import shutil
+    import tempfile
+
+    path = tempfile.mkdtemp(prefix="logsystem_test_")
+    _TEST_DIR_CACHE["dir"] = path
+    atexit.register(shutil.rmtree, path, True)
+    return path
+
+
 def _apply_overrides(cfg: "LogConfig", overrides: Dict[str, object]) -> "LogConfig":
-    """把 ``**overrides`` 应用到配置档预设上，未知字段直接报错（避免拼写错误静默失效）。"""
+    """把 ``**overrides`` 应用到配置档预设上。
+
+    只允许覆盖**真正的 dataclass 字段**。历史实现用 ``hasattr`` 判断，于是
+    方法也能被覆盖：``LogConfig.for_dev(to_dict=1, ensure_dir="oops")`` 会成功
+    并破坏对象，且拼错字段名时若恰好撞上方法名也不会报错。
+    """
+    fields = {f.name for f in dataclasses.fields(cfg)}
     for key, value in overrides.items():
-        if not hasattr(cfg, key):
-            raise TypeError(f"LogConfig 无字段 {key!r}")
+        if key not in fields:
+            raise TypeError(
+                f"LogConfig 无字段 {key!r}，可选：{sorted(fields)}"
+            )
         setattr(cfg, key, value)
     cfg.__post_init__()
     return cfg

@@ -53,26 +53,47 @@ def get_business_id() -> Optional[str]:
 #: 全链路追踪直接失效。把兜底能力下沉到 logsystem 内部后，
 #: 使用方无需在每处埋点外层手动包 trace_scope。
 _BUSINESS_ID_RESOLVERS: list = []
+#: 保护注册的 check-then-append（S22：并发注册可能重复追加）
+_RESOLVER_LOCK = threading.Lock()
 
 
 def register_business_id_resolver(resolver) -> None:
-    """注册 business_id 兜底解析器（重复注册幂等）。"""
-    if resolver not in _BUSINESS_ID_RESOLVERS:
-        _BUSINESS_ID_RESOLVERS.append(resolver)
+    """注册 business_id 兜底解析器（重复注册幂等、线程安全）。"""
+    with _RESOLVER_LOCK:
+        if resolver not in _BUSINESS_ID_RESOLVERS:
+            _BUSINESS_ID_RESOLVERS.append(resolver)
+
+
+#: 重入保护：解析期间若某个 resolver 自己又写了日志，会再次进入
+#: resolve_business_id，形成指数级放大（实测一次 log_event 触发 199 次
+#: resolver / 198 行日志，最终靠吞掉 RecursionError 才停下）。
+_RESOLVING = threading.local()
 
 
 def resolve_business_id() -> Optional[str]:
-    """解析 business_id：contextvar 优先，其次注册的兜底解析器。"""
+    """解析 business_id：contextvar 优先，其次注册的兜底解析器。
+
+    带**重入保护**：解析过程中不再递归调用 resolver（返回 None），
+    避免"记日志 → 解析 id → 又记日志"的自我放大。
+    """
     bid = _business_id.get()
     if bid:
         return bid
-    for resolver in _BUSINESS_ID_RESOLVERS:
-        try:
-            value = resolver()
-        except Exception:
-            continue
-        if value:
-            return value
+    if getattr(_RESOLVING, "active", False):
+        return None
+    _RESOLVING.active = True
+    try:
+        for resolver in _BUSINESS_ID_RESOLVERS:
+            try:
+                value = resolver()
+            except Exception:
+                continue
+            if isinstance(value, str) and value.strip():
+                return value
+            # 非字符串/空串一律忽略：类型不做校验时，list 之类会让
+            # run_analysis_async 的 dict key 变成 unhashable 而抛 TypeError。
+    finally:
+        _RESOLVING.active = False
     return None
 
 

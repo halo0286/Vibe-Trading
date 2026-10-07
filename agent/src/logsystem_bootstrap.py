@@ -229,6 +229,22 @@ def result_error(result: Any) -> tuple:
     return code, (str(msg)[:200] or None)
 
 
+def safe_str(value: Any, limit: int = 200) -> str:
+    """把任意对象安全转成字符串（**绝不抛异常**）。
+
+    埋点里直接 ``str(exc)`` 是危险的：异常类可以重写 ``__str__`` 并让它抛错，
+    于是**日志代码会顶替掉真正的业务异常**（实测：``Bad.__str__`` 抛错时，
+    调用方收到的是 ``str() exploded`` 而不是 ``Bad``）。埋点必须只能旁路。
+    """
+    try:
+        return str(value)[:limit]
+    except Exception:
+        try:
+            return type(value).__name__
+        except Exception:
+            return "<unstringifiable>"
+
+
 def traced_step(step: str, *, summarize=None):
     """通用步骤埋点装饰器（同步函数）。
 
@@ -259,7 +275,7 @@ def traced_step(step: str, *, summarize=None):
                     step=step,
                     status="failed",
                     error_code=type(exc).__name__,
-                    error_msg=str(exc)[:200],
+                    error_msg=safe_str(exc, 200),
                     extra={"cost_ms": int((time.monotonic() - t0) * 1000)},
                 )
                 raise
@@ -314,6 +330,7 @@ __all__ = [
     "safe_log_event",
     "traced_step",
     "business_outcome",
+    "safe_str",
     "SUCCESS_VERDICTS",
     "result_error",
     "drain_analysis",

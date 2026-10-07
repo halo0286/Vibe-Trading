@@ -90,6 +90,8 @@ ADVANCED_API = (
     "LogAnalyzer",
 )
 
-__all__ = list(CORE_API) + ["CORE_API", "ADVANCED_API"]
+# `__all__` 就是 CORE_API 本身（8 项）。两个层级常量仍可按名导入，
+# 但不再出现在 `import *` 中 —— 此前文档说"只暴露 8 个"而实际是 10 个。
+__all__ = list(CORE_API)
 
 __version__ = "1.0.0"
