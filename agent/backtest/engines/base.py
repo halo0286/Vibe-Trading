@@ -15,8 +15,6 @@ import math
 import re as _re
 import sys
 from abc import ABC, abstractmethod
-
-from src.logsystem_bootstrap import traced_step
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
@@ -27,6 +25,7 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from src.logsystem_bootstrap import traced_step
 from backtest.constraints import apply_constraints_frame, load_constraints
 from backtest.loaders.rsshub_events import (
     FeedSpec,

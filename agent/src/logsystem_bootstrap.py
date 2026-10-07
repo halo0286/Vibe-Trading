@@ -224,6 +224,40 @@ def safe_log_event(
         )
     except Exception:
         pass
+
+@functools.lru_cache(maxsize=None)
+def _summarizer_positional_arity(summarize) -> int:
+    """摘要器可接受的位置参数个数（-1 表示可变/无法判定）。"""
+    try:
+        import inspect
+
+        params = [
+            p for p in inspect.signature(summarize).parameters.values()
+            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+        ]
+        if any(
+            p.kind is p.VAR_POSITIONAL
+            for p in inspect.signature(summarize).parameters.values()
+        ):
+            return -1
+        return len(params)
+    except Exception:
+        return -1
+
+
+def _call_summarizer(summarize, args, kwargs, result):
+    """兼容两种摘要器约定：``(args, kwargs, result)`` 与 ``(result)``。
+
+    历史问题：``traced_step`` 只按 3 参调用，而 ``service._order_summary`` 是
+    1 参 —— 传错时 TypeError 被静默吞掉，摘要**静默变成空 dict**，日志上看不出
+    任何异常。这里按可判定到的参数个数适配，并把两种约定都显式支持。
+    """
+    arity = _summarizer_positional_arity(summarize)
+    if arity == 1:
+        return summarize(result)
+    return summarize(args, kwargs, result)
+
+
 def traced_step(step: str, *, summarize=None):
     """通用步骤埋点装饰器（同步函数）。
 
@@ -268,7 +302,7 @@ def traced_step(step: str, *, summarize=None):
             extra = {"cost_ms": int((time.monotonic() - t0) * 1000)}
             if summarize is not None:
                 try:
-                    extra.update(summarize(args, kwargs, result) or {})
+                    extra.update(_call_summarizer(summarize, args, kwargs, result) or {})
                 except Exception:
                     pass
             # 返回错误载荷 ≠ 成功：这类函数（alpha bench / 交易查询等）以

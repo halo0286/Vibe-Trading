@@ -339,3 +339,73 @@ def test_tool_success_stays_info(tmp_path):
 
     assert fields["status"] == "success", fields
     assert fields.get("level") == "INFO", fields
+
+
+# --------------------------------------------------------------------------- #
+# L6：摘要器两种参数约定都要支持（此前 1 参会被静默吞成空摘要）
+# --------------------------------------------------------------------------- #
+
+def test_summarizer_three_arg_convention(tmp_path):
+    from src.logsystem import LogConfig, configure
+    from src.logsystem_bootstrap import traced_step
+
+    configure(LogConfig(log_dir=str(tmp_path), level="INFO",
+                        enable_async_analysis=False))
+
+    @traced_step("s.three", summarize=lambda a, k, r: {"n": r})
+    def fn(x):
+        return x + 1
+
+    fn(1)
+    assert "n=2" in _read(tmp_path), _read(tmp_path)
+
+
+def test_summarizer_one_arg_convention(tmp_path):
+    """``service._order_summary`` 是 1 参；传错时此前静默得空摘要。"""
+    from src.logsystem import LogConfig, configure
+    from src.logsystem_bootstrap import traced_step
+    from src.trading.service import _order_summary
+
+    configure(LogConfig(log_dir=str(tmp_path), level="INFO",
+                        enable_async_analysis=False))
+
+    @traced_step("s.one", summarize=_order_summary)
+    def place():
+        return {"status": "ok", "order_id": "O1", "quantity": 7}
+
+    place()
+    disk = _read(tmp_path)
+    assert "order_id=O1" in disk, f"1 参摘要器被静默吞掉: {disk}"
+    assert "quantity=7" in disk, disk
+
+
+def test_summarizer_arity_is_cached():
+    from src.logsystem_bootstrap import _summarizer_positional_arity
+
+    _summarizer_positional_arity.cache_clear()
+    fn = lambda a, k, r: {}
+    for _ in range(5):
+        _summarizer_positional_arity(fn)
+    info = _summarizer_positional_arity.cache_info()
+    assert info.misses == 1, info
+
+
+def test_varargs_summarizer_still_gets_three_args(tmp_path):
+    """``*args`` 形式按 3 参调用（保持向后兼容）。"""
+    from src.logsystem import LogConfig, configure
+    from src.logsystem_bootstrap import traced_step
+
+    configure(LogConfig(log_dir=str(tmp_path), level="INFO",
+                        enable_async_analysis=False))
+    seen = {}
+
+    def summ(*a):
+        seen["n"] = len(a)
+        return {"n": len(a)}
+
+    @traced_step("s.var", summarize=summ)
+    def fn(x):
+        return x
+
+    fn(1)
+    assert seen["n"] == 3, seen

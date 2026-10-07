@@ -868,6 +868,7 @@ def _traced_order(step: str) -> Any:
 
     return deco
 
+
 @_traced_order("trading.place_order")
 def place_order(
     symbol: str,
