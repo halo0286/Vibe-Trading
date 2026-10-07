@@ -227,11 +227,29 @@ _READ_COUNT_KEYS = ("positions", "orders", "accounts", "history", "history_deals
                     "items", "rows", "data", "cash_flow", "financials")
 
 
-def _read_summary(args: tuple, kwargs: dict, result: Any) -> dict:
-    """只读操作摘要：只记规模与状态，不记任何财务数值。
+#: 摘要里字符串字段的截断上限。
+#: broker 返回的 error/reason 可能很长（实测单行 7500 字符），且可能内嵌账号
+#: 或金额样式内容 —— 落盘前必须截断。
+_MAX_SUMMARY_CHARS = 200
 
-    账户余额、持仓数量、成交明细都可能属于用户隐私，落盘会扩大泄露面；
-    这里只保留「有没有、有多少条」以及 profile/连接器等非敏感元数据。
+
+def _clip(value: Any) -> Any:
+    """字符串按上限截断；其它类型原样返回。"""
+    if isinstance(value, str) and len(value) > _MAX_SUMMARY_CHARS:
+        return value[:_MAX_SUMMARY_CHARS] + "...<truncated>"
+    return value
+
+
+def _read_summary(args: tuple, kwargs: dict, result: Any) -> dict:
+    """只读操作摘要：不记**财务数值**，只记规模、状态与非敏感元数据。
+
+    账户余额、持仓数量、成交明细都属用户隐私，落盘会扩大泄露面；这里只保留
+    「有没有、有多少条」（``*_count``）以及 profile/连接器等元数据。
+
+    例外：``error`` / ``reason`` 是 broker 返回的**自由文本**，无法保证其中
+    不含账号或金额样式内容。因此（1）它们会被 logsystem 的文本脱敏处理，
+    （2）这里再做长度截断 —— 此前原样落盘，实测出现过单行 7500 字符、
+    内嵌账号样式串的记录。"不记任何财务数值"的旧说法过于绝对，已更正。
     """
     out: dict = {}
     if isinstance(result, dict):
@@ -242,7 +260,7 @@ def _read_summary(args: tuple, kwargs: dict, result: Any) -> dict:
         for key in _READ_SUMMARY_KEYS:
             value = result.get(key)
             if isinstance(value, (str, int, float, bool)) and not isinstance(value, bool):
-                out[key] = value
+                out[key] = _clip(value)
         for key in _READ_COUNT_KEYS:
             value = result.get(key)
             if isinstance(value, (list, dict, tuple)):
@@ -758,6 +776,10 @@ def _order_classification(connector: str, symbol: str):
 
 #: 允许落盘的订单字段白名单（防止把 broker 返回中的账号/密钥等敏感信息写进日志）
 #: 同上：不得使用 "status"（会覆盖规范字段），改用 order_status；补 reason。
+#:
+#: 与只读摘要的策略差异是**刻意**的：下单/撤单属于审计事件，quantity /
+#: average_price / limit_price 是合规留痕必需的字段，因此这里保留；而只读查询
+#: （查余额/持仓）不保留任何数值。两者的边界在此明确，避免被当成不一致的漏洞。
 _ORDER_SUMMARY_KEYS = (
     "order_id", "client_order_id", "order_status", "symbol", "side", "quantity",
     "filled_quantity", "average_price", "limit_price", "order_type",
@@ -775,7 +797,7 @@ def _order_summary(result: Any) -> dict[str, Any]:
     if not isinstance(result, dict):
         return {}
     out = {
-        k: result[k]
+        k: _clip(result[k])
         for k in _ORDER_SUMMARY_KEYS
         if k in result and isinstance(result[k], (str, int, float, bool, type(None)))
     }

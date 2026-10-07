@@ -300,7 +300,11 @@ def traced_step(step: str, *, summarize=None):
             t0 = time.monotonic()
             try:
                 result = func(*args, **kwargs)
-            except Exception as exc:  # noqa: BLE001 - 记录后原样抛出
+            except BaseException as exc:  # noqa: BLE001 - 记录后**原样抛出**
+                # 捕获 BaseException 而不仅是 Exception：`sys.exit(1)` 抛的是
+                # SystemExit，属于真实失败路径（如 BaseEngine.run_backtest 在
+                # 无数据/空信号时），此前这类路径**什么日志都不产生**。
+                # 这里只做记录，异常照常向上传播，语义不变。
                 safe_log_event(
                     logging.WARNING,
                     f"{step}.failed",
