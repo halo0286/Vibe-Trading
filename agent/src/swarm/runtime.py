@@ -249,6 +249,19 @@ def _task_definition_changed(
     return False
 
 
+
+#: run.status 中表示"业务成功"的取值（其余一律按失败/取消处理）
+_SWARM_SUCCESS_STATUS = frozenset({"completed", "succeeded", "success"})
+
+
+def _swarm_outcome(run: Any) -> str:
+    """由 ``run.status`` 判定编排业务成败（不依赖是否抛异常）。"""
+    raw = getattr(run, "status", None)
+    value = getattr(raw, "value", raw)
+    return "success" if str(value).strip().lower() in _SWARM_SUCCESS_STATUS else "failed"
+
+
+
 def _swarm_log(status: str, run: Any, t0: float | None = None, error: BaseException | None = None) -> None:
     """Swarm 编排埋点（旁路，绝不抛异常）。
 
@@ -411,7 +424,10 @@ class SwarmRuntime:
             daemon=True,
         )
         thread.start()
-        _swarm_log("started", run)
+        # 注意：**不**在此处记 started —— 这里是调用者上下文，没有绑定
+        # business_id（会落成 business_id=-），且它在 thread.start() 之后，
+        # 可能晚于 worker 内已记录的 running，导致 finish_and_analyze(run.id)
+        # 看不到首个事件。started 改到 worker 的 trace_scope 内最先记录。
 
         return run
 
@@ -497,13 +513,16 @@ class SwarmRuntime:
         except Exception:
             scope = contextlib.nullcontext()
         with scope:
-            _swarm_log("running", run, _t0)
+            _swarm_log("started", run, _t0)
             try:
                 self._execute_run(run, cancel_event, include_shell_tools, resume_from)
             except Exception as exc:
                 _swarm_log("failed", run, _t0, error=exc)
                 raise
-            _swarm_log("success", run, _t0)
+            # 业务失败**不会**抛异常：_execute_run 内部捕获一切并把 run.status
+            # 置为 failed/cancelled 后正常返回。此前无条件记 success，使失败
+            # 或取消的运行在日志里读起来是成功（与 C-3 同类缺陷）。
+            _swarm_log(_swarm_outcome(run), run, _t0)
 
     def _execute_run(
         self,

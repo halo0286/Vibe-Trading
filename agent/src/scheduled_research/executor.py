@@ -197,28 +197,43 @@ def _enum_value(value):
     return getattr(value, "value", value)
 
 def _sched_log(status: str, fields: dict, t0: float | None = None,
-               error: BaseException | None = None) -> None:
+               error: BaseException | None = None,
+               business_id: str | None = None) -> None:
     """定时研究调度埋点（场景 10 的自动化触发环节，旁路且绝不抛异常）。
 
     此前 ``scheduled_research`` 完全没有埋点，导致「定时触发」不可见：
     场景 10 只能看到渠道推送，看不到"谁在什么时候触发了哪个 job、
     成功还是失败、连续失败几次"。
+
+    ``business_id``：调度任务跑在服务启动时的上下文里，**不会**自动继承任何
+    业务身份，因此此前所有 scheduled.* 事件都落成 ``business_id=-`` —— 无法按
+    业务关联。这里按 job 绑定 ``sched-<job_id>``（tick 用 ``sched-tick``），
+    使「一次定时触发 == 一个 business_id」，可与其后的 channel 推送串起来。
     """
     try:
-        from src.logsystem_bootstrap import safe_log_event
+        import contextlib
+
+        from src.logsystem import trace_scope
+        from src.logsystem_bootstrap import safe_log_event, safe_str
 
         extra = dict(fields)
         if t0 is not None:
             extra["cost_ms"] = int((time.monotonic() - t0) * 1000)
-        safe_log_event(
-            logging.INFO if status in ("tick", "job_done") else logging.WARNING,
-            f"scheduled.{status}",
-            step="scheduled.research",
-            status=status,
-            error_code=type(error).__name__ if error else None,
-            error_msg=str(error)[:200] if error else None,
-            extra=extra,
+        scope = (
+            trace_scope(business_id=business_id)
+            if business_id
+            else contextlib.nullcontext()
         )
+        with scope:
+            safe_log_event(
+                logging.INFO if status in ("tick", "job_done") else logging.WARNING,
+                f"scheduled.{status}",
+                step="scheduled.research",
+                status=status,
+                error_code=type(error).__name__ if error else None,
+                error_msg=safe_str(error, 200) if error else None,
+                extra=extra,
+            )
     except Exception:
         pass
 
@@ -362,7 +377,7 @@ class ScheduledResearchExecutor:
             _sched_log("tick", {
                 "due": len(jobs),
                 "job_ids": ",".join(str(getattr(j, "id", "")) for j in jobs[:10]),
-            })
+            }, business_id="sched-tick")
         for job in jobs:
             # One job's unexpected persistence/lifecycle error must not starve
             # every job sorted after it, tick after tick.
@@ -377,7 +392,7 @@ class ScheduledResearchExecutor:
                     "job_id": str(getattr(job, "id", "")),
                     "schedule": getattr(job, "schedule", None),
                     "consecutive_failures": getattr(job, "consecutive_failures", None),
-                }, _t0, exc)
+                }, _t0, exc, business_id=f"sched-{getattr(job, 'id', 'unknown')}")
             else:
                 # _run_job 会**内部吞掉**派发失败（自增 consecutive_failures、
                 # 置 failure_kind="dispatch"、然后 return），所以"没抛异常"
@@ -406,9 +421,10 @@ class ScheduledResearchExecutor:
                         failure_kind=failure_kind,
                         consecutive_failures=getattr(snap, "consecutive_failures", None),
                         error_msg=str(last_error)[:200] if last_error else None,
-                    ), _t0)
+                    ), _t0, business_id=f"sched-{getattr(snap, 'id', 'unknown')}")
                 else:
-                    _sched_log("job_done", fields, _t0)
+                    _sched_log("job_done", fields, _t0,
+                               business_id=f"sched-{getattr(snap, 'id', 'unknown')}")
 
         # The sweep is what makes delivery correct; the event hook only makes
         # it prompt. A briefing whose hook was lost to a restart, a crash
