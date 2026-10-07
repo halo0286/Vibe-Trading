@@ -14,6 +14,12 @@ from .constants import SENSITIVE_KEYS_DEFAULT
 class LogConfig:
     """日志系统总配置。
 
+    推荐用配置档替代手写字段（见 ``for_dev`` / ``for_prod`` / ``for_test`` /
+    ``for_profile``）：:
+
+        from logsystem import LogConfig, configure
+        configure(LogConfig.for_profile(os.getenv("LOG_PROFILE", "dev")))
+
     Attributes:
         log_dir: 日志文件目录。
         rotation_bytes: 单文件滚动阈值（字节），默认 100MB。
@@ -81,13 +87,88 @@ class LogConfig:
                 uniq.append(k)
         return uniq
 
+    # ------------------------------------------------------------------
+    # 配置档（P1）：dev / prod / test 三套预设，避免每个项目重复抄配置
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def for_dev(cls, log_dir: Optional[str] = None, **overrides: object) -> "LogConfig":
+        """开发档：DEBUG 全量、终端可读、文件小滚动便于 tail。"""
+        cfg = cls(
+            log_dir=log_dir or "./logs",
+            level="DEBUG",
+            console_level="DEBUG",
+            file_format="kv",
+            rotation_bytes=10 * 1024 * 1024,
+            retention_days=3,
+            sample_rate=1.0,
+            rate_limit_max=0,
+            enable_async_analysis=False,
+        )
+        return _apply_overrides(cfg, overrides)
+
+    @classmethod
+    def for_prod(cls, log_dir: Optional[str] = None, **overrides: object) -> "LogConfig":
+        """生产档：INFO、终端只留 WARNING、JSON 结构化、长保留 + 限流。"""
+        cfg = cls(
+            log_dir=log_dir or "./logs",
+            level="INFO",
+            console_level="WARNING",
+            file_format="json",
+            rotation_bytes=100 * 1024 * 1024,
+            retention_days=30,
+            sample_rate=1.0,
+            rate_limit_window_seconds=1.0,
+            rate_limit_max=2000,
+            enable_async_analysis=True,
+        )
+        return _apply_overrides(cfg, overrides)
+
+    @classmethod
+    def for_test(cls, log_dir: Optional[str] = None, **overrides: object) -> "LogConfig":
+        """测试档：不污染终端、不跑分析、不清理文件，目录默认隔离。"""
+        if log_dir is None:
+            import tempfile
+
+            log_dir = tempfile.mkdtemp(prefix="logsystem_test_")
+        cfg = cls(
+            log_dir=log_dir,
+            level="WARNING",
+            console_level="CRITICAL",
+            file_format="kv",
+            rotation_bytes=1024 * 1024,
+            retention_days=0,
+            sample_rate=1.0,
+            rate_limit_max=0,
+            enable_async_analysis=False,
+        )
+        return _apply_overrides(cfg, overrides)
+
+    @classmethod
+    def for_profile(
+        cls, profile: str, log_dir: Optional[str] = None, **overrides: object
+    ) -> "LogConfig":
+        """按名字取配置档：``dev`` / ``prod`` / ``test``。"""
+        table = {"dev": cls.for_dev, "prod": cls.for_prod, "test": cls.for_test}
+        key = (profile or "dev").strip().lower()
+        if key not in table:
+            raise ValueError(
+                f"未知日志配置档 {profile!r}，可选：{sorted(table)}"
+            )
+        return table[key](log_dir=log_dir, **overrides)
+
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_env(cls) -> "LogConfig":
-        """从环境变量构建配置（便于无代码配置）。"""
-        cfg = cls()
+        """从环境变量构建配置（便于无代码配置）。
+
+        支持 ``LOG_PROFILE=dev|prod|test`` 选择配置档，其余单项环境变量
+        在其之上覆盖。
+        """
+        profile = os.getenv("LOG_PROFILE")
+        cfg = cls.for_profile(profile) if profile else cls()
         if os.getenv("LOG_DIR"):
             cfg.log_dir = os.environ["LOG_DIR"]
         if os.getenv("LOG_ROTATION_BYTES"):
@@ -96,9 +177,20 @@ class LogConfig:
             cfg.level = os.environ["LOG_LEVEL"]
         if os.getenv("LOG_RETENTION_DAYS"):
             cfg.retention_days = int(os.environ["LOG_RETENTION_DAYS"])
+        cfg.__post_init__()
         return cfg
 
     def ensure_dir(self) -> Path:
         p = Path(self.log_dir)
         p.mkdir(parents=True, exist_ok=True)
         return p
+
+
+def _apply_overrides(cfg: "LogConfig", overrides: Dict[str, object]) -> "LogConfig":
+    """把 ``**overrides`` 应用到配置档预设上，未知字段直接报错（避免拼写错误静默失效）。"""
+    for key, value in overrides.items():
+        if not hasattr(cfg, key):
+            raise TypeError(f"LogConfig 无字段 {key!r}")
+        setattr(cfg, key, value)
+    cfg.__post_init__()
+    return cfg

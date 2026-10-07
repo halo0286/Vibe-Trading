@@ -6,6 +6,7 @@ ChatLLM is designed specifically for the AgentLoop ReAct cycle.
 from __future__ import annotations
 
 import asyncio
+import functools
 import html
 import inspect
 import logging
@@ -325,6 +326,101 @@ def _parse_dsml_tool_calls(content: Any) -> list[ToolCallRequest]:
     return tool_calls
 
 
+def _prompt_shape(messages: Any) -> tuple[int, int]:
+    """Prompt 规模 ``(消息条数, 总字符数)``。
+
+    用于观察 prompt 组装是否失控（上下文膨胀是 no_progress/超窗的常见前兆）。
+    """
+    try:
+        n = len(messages)
+    except Exception:
+        return 0, 0
+    total = 0
+    try:
+        for m in messages:
+            content = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
+            if isinstance(content, str):
+                total += len(content)
+            elif isinstance(content, (list, tuple)):
+                for part in content:
+                    if isinstance(part, dict):
+                        total += len(str(part.get("text") or ""))
+                    else:
+                        total += len(str(part))
+            elif content is not None:
+                total += len(str(content))
+    except Exception:
+        pass
+    return n, total
+
+
+def _llm_log(status: str, fields: Dict[str, Any], cost_ms: int) -> None:
+    """LLM 埋点落盘（旁路，绝不抛异常）。"""
+    try:
+        from src.logsystem_bootstrap import safe_log_event
+
+        err = fields.pop("error_type", None)
+        safe_log_event(
+            logging.INFO if status == "success" else logging.WARNING,
+            f"llm.{status}",
+            step="llm.call",
+            status=status,
+            error_code=err,
+            extra={"cost_ms": cost_ms, **fields},
+        )
+    except Exception:
+        pass
+
+
+def _traced_llm_call(func: Callable) -> Callable:
+    """给 LLM 调用加埋点（P2）。
+
+    ``ChatLLM.chat`` / ``ChatLLM.stream_chat`` 是全部 25 个 provider 的唯一
+    出口，装饰这两处即可覆盖整个 LLM 层（此前该层 0 埋点，是端到端链路
+    最大的盲区）。记录：模型、prompt 规模、耗时、token、工具调用数、错误。
+    """
+
+    @functools.wraps(func)
+    def wrapper(self, messages, *args, **kwargs):
+        t0 = _time.monotonic()
+        n_msg, n_chars = _prompt_shape(messages)
+        base: Dict[str, Any] = {
+            "model": getattr(self, "model_name", None),
+            "stream": func.__name__ == "stream_chat",
+            "prompt_messages": n_msg,
+            "prompt_chars": n_chars,
+        }
+        try:
+            resp = func(self, messages, *args, **kwargs)
+        except Exception as exc:
+            _llm_log(
+                "failed",
+                dict(base, error_type=type(exc).__name__, error_msg=str(exc)[:200]),
+                int((_time.monotonic() - t0) * 1000),
+            )
+            raise
+        cost_ms = int((_time.monotonic() - t0) * 1000)
+        usage = getattr(resp, "usage_metadata", None) or {}
+        _llm_log(
+            "success",
+            dict(
+                base,
+                response_model=getattr(resp, "response_model", None),
+                finish_reason=getattr(resp, "finish_reason", None),
+                tool_calls=len(getattr(resp, "tool_calls", None) or ()),
+                content_chars=len(getattr(resp, "content", None) or ""),
+                input_tokens=usage.get("input_tokens"),
+                output_tokens=usage.get("output_tokens"),
+                total_tokens=usage.get("total_tokens"),
+                content_filtered=bool(getattr(resp, "content_filter_triggered", False)),
+            ),
+            cost_ms,
+        )
+        return resp
+
+    return wrapper
+
+
 class ChatLLM:
     """LLM chat client with function calling support.
 
@@ -455,6 +551,7 @@ class ChatLLM:
 
         task.add_done_callback(_log_failure)
 
+    @_traced_llm_call
     def chat(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None, timeout: Optional[int] = None) -> LLMResponse:
         """Call the LLM synchronously.
 
@@ -472,6 +569,7 @@ class ChatLLM:
         ai_message = llm.invoke(messages, config=config, **call_kwargs)
         return self._parse_response(ai_message)
 
+    @_traced_llm_call
     def stream_chat(
         self,
         messages: List[Dict[str, Any]],

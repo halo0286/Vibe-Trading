@@ -97,17 +97,14 @@ def _log_tool_call(
             extra["exception_type"] = type(error).__name__
             extra["stack_trace"] = traceback.format_exc()[:4000]
 
-        # business_id 来源：优先使用调用方已绑定的追踪上下文；若没有，
-        # 回退到 LLM session id —— 一次研究会话 == 一个 business_id，
-        # 使同一次会话内的所有工具调用可在全链路上关联。
-        _bid = get_business_id()
-        if not _bid:
-            try:
-                from src.providers.session_context import current_llm_session_id
+        # P0-2：统一走 logsystem_bootstrap.current_business_id()
+        # （trace_scope 优先，其次 LLM session_id 兜底），避免调用点各自兜底。
+        try:
+            from src.logsystem_bootstrap import current_business_id
 
-                _bid = current_llm_session_id() or None
-            except Exception:
-                _bid = None
+            _bid = current_business_id()
+        except Exception:
+            _bid = get_business_id()
 
         import contextlib
 

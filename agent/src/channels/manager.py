@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import time as _time
 from collections import defaultdict
 from contextlib import suppress
 from typing import Any
@@ -21,6 +22,60 @@ from src.channels.registry import (
 from src.config.paths import get_workspace_path
 
 logger = logging.getLogger(__name__)
+
+# --------------------------------------------------------------------------- #
+# IM 推送埋点（P2）
+# --------------------------------------------------------------------------- #
+# _send_with_retry 是全部 16 个 IM 渠道出站消息的唯一漏斗（含流式/推理/进度）。
+# 此前场景 10「IM 推送」是唯一完全无埋点的场景。
+
+
+def _channel_kind(msg: Any) -> str:
+    """归类出站消息类型，便于按类型统计推送成功率。"""
+    md = getattr(msg, "metadata", None) or {}
+    for key, kind in (
+        ("_reasoning_end", "reasoning_end"),
+        ("_reasoning_delta", "reasoning_delta"),
+        ("_reasoning", "reasoning"),
+        ("_file_edit_events", "file_edit_events"),
+        ("_stream_delta", "stream_delta"),
+        ("_stream_end", "stream_end"),
+        ("_progress", "progress"),
+    ):
+        if md.get(key):
+            return kind
+    return "message"
+
+
+def _channel_log(
+    status: str, msg: Any, attempts: int, t0: float, error: BaseException | None = None,
+) -> None:
+    """IM 推送埋点落盘（旁路，绝不抛异常）。
+
+    只记录内容**长度**而非内容本身：IM 消息常含用户私有信息，
+    落盘正文会扩大泄露面。
+    """
+    try:
+        from src.logsystem_bootstrap import safe_log_event
+
+        safe_log_event(
+            logging.INFO if status == "success" else logging.WARNING,
+            f"channel.{status}",
+            step="channel.push",
+            status=status,
+            error_code=type(error).__name__ if error else None,
+            error_msg=str(error)[:200] if error else None,
+            extra={
+                "channel": getattr(msg, "channel", None),
+                "chat_id": str(getattr(msg, "chat_id", ""))[:64],
+                "kind": _channel_kind(msg),
+                "content_chars": len(getattr(msg, "content", None) or ""),
+                "attempts": attempts,
+                "cost_ms": int((_time.monotonic() - t0) * 1000),
+            },
+        )
+    except Exception:
+        pass
 
 # Retry delays for message sending (exponential backoff: 1s, 2s, 4s)
 _SEND_RETRY_DELAYS = (1, 2, 4)
@@ -537,9 +592,11 @@ class ChannelManager:
         elif hasattr(self.config, "send_max_retries"):
             max_attempts = max(self.config.send_max_retries, 1)
 
+        _t0 = _time.monotonic()
         for attempt in range(max_attempts):
             try:
                 await self._send_once(channel, msg)
+                _channel_log("success", msg, attempt + 1, _t0)
                 return
             except asyncio.CancelledError:
                 raise
@@ -549,6 +606,7 @@ class ChannelManager:
                         "Failed to send to %s after %d attempts",
                         msg.channel, max_attempts,
                     )
+                    _channel_log("failed", msg, attempt + 1, _t0, error=e)
                     return
                 delay = _SEND_RETRY_DELAYS[min(attempt, len(_SEND_RETRY_DELAYS) - 1)]
                 logger.warning(

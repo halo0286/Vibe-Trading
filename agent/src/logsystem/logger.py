@@ -382,3 +382,45 @@ def log_business_event(
         # 冲突键加 "ls_" 前缀，避免 logging 因覆盖 LogRecord 保留属性而抛错
         merged_extra[f"ls_{k}" if k in _LOGRECORD_RESERVED else k] = v
     logger.log(level, message, extra=merged_extra)
+
+
+def log_event(
+    level: int,
+    message: str,
+    *,
+    step: Optional[str] = None,
+    status: Optional[str] = None,
+    error_code: Optional[str] = None,
+    error_msg: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+    logger: Optional[logging.Logger] = None,
+) -> None:
+    """记录业务事件（免传 logger 的推荐入口）。
+
+    ``log_business_event`` 要求调用方传入 logsystem 命名空间下的 logger：
+    handler 只挂在 "logsystem" 上，传普通 logger 会让日志被静默丢弃。
+    本函数封装该约定 —— 缺省自动使用 ``logsystem.business``，
+    业务代码不需要知道命名空间细节。
+
+    Args:
+        level: 日志级别（logging.INFO 等）。
+        message: 事件描述。
+        step: 业务步骤标识，如 "order.submit"（同时作为限流维度）。
+        status: 状态，如 "success" / "failed"。
+        error_code: 错误码。
+        error_msg: 错误信息。
+        extra: 附加结构化字段（敏感键自动脱敏）。
+        logger: 可选自定义 logger；必须是 logsystem 命名空间下的。
+    """
+    if logger is None:
+        logger = get_logger("business")
+    log_business_event(
+        logger,
+        level,
+        message,
+        step=step,
+        status=status,
+        error_code=error_code,
+        error_msg=error_msg,
+        extra=extra,
+    )

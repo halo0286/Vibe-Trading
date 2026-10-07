@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import functools
 import math
 import sys
+import time as _time
 from typing import Any
 
 from src.trading.profiles import list_profiles, profile_by_id
@@ -694,6 +696,93 @@ def _order_classification(connector: str, symbol: str):
     return instrument, None
 
 
+# --------------------------------------------------------------------------- #
+# 交易写操作审计埋点（P2）
+# --------------------------------------------------------------------------- #
+
+#: 允许落盘的订单字段白名单（防止把 broker 返回中的账号/密钥等敏感信息写进日志）
+_ORDER_SUMMARY_KEYS = (
+    "order_id", "client_order_id", "status", "symbol", "side", "quantity",
+    "filled_quantity", "average_price", "limit_price", "order_type",
+    "time_in_force", "error", "profile_id", "connector", "environment",
+    "transport",
+)
+
+
+def _ms(t0: float) -> int:
+    return int((_time.monotonic() - t0) * 1000)
+
+
+def _order_summary(result: Any) -> dict[str, Any]:
+    """只取白名单字段，且只保留可安全序列化的标量。"""
+    if not isinstance(result, dict):
+        return {}
+    return {
+        k: result[k]
+        for k in _ORDER_SUMMARY_KEYS
+        if k in result and isinstance(result[k], (str, int, float, bool, type(None)))
+    }
+
+
+def _trading_log(step: str, status: str, *, cost_ms: int | None = None,
+                 error_code: str | None = None, error_msg: str | None = None,
+                 extra: dict[str, Any] | None = None) -> None:
+    """交易埋点落盘（旁路，绝不抛异常）。"""
+    try:
+        import logging
+
+        from src.logsystem_bootstrap import safe_log_event
+
+        safe_log_event(
+            logging.INFO if status == "success" else logging.WARNING,
+            f"{step}.{status}",
+            step=step,
+            status=status,
+            error_code=error_code,
+            error_msg=error_msg,
+            extra={"cost_ms": cost_ms, **(extra or {})},
+        )
+    except Exception:
+        pass
+
+
+def _traced_order(step: str) -> Any:
+    """交易写操作审计埋点装饰器（P2）。
+
+    ``place_order`` / ``cancel_order`` 是通用交易工具的唯一出口，装饰这两处
+    即可让**全部 18 个 broker connector** 的每一笔下单/撤单都带上
+    business_id / trace_id 落盘。与既有合规 audit ledger 互补：ledger 面向
+    合规留痕，logsystem 面向链路追踪与自动分析（此前该链路 0 埋点，
+    是场景 5/6「影子账户 / 实盘交易」的主要盲区）。
+    """
+
+    def deco(func: Any) -> Any:
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            t0 = _time.monotonic()
+            try:
+                result = func(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - 记录后原样抛出
+                _trading_log(
+                    step, "failed", cost_ms=_ms(t0),
+                    error_code=type(exc).__name__, error_msg=str(exc)[:200],
+                )
+                raise
+            summary = _order_summary(result)
+            status = "success"
+            if isinstance(result, dict) and str(result.get("status", "")).lower() in (
+                "error", "failed", "rejected",
+            ):
+                status = "rejected"
+            _trading_log(step, status, cost_ms=_ms(t0), extra=summary)
+            return result
+
+        return wrapper
+
+    return deco
+
+
+@_traced_order("trading.place_order")
 def place_order(
     symbol: str,
     profile_id: str | None = None,
@@ -761,6 +850,7 @@ def place_order(
     return _with_profile(profile, result)
 
 
+@_traced_order("trading.cancel_order")
 def cancel_order(
     order_id: str,
     profile_id: str | None = None,

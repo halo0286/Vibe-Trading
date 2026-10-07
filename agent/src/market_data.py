@@ -2,14 +2,103 @@
 
 from __future__ import annotations
 
+import functools
+import inspect
 import json
 import logging
 import math
 import re
+import time as _time
 from collections.abc import Callable
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# --------------------------------------------------------------------------- #
+# 行情加载埋点（P2）
+# --------------------------------------------------------------------------- #
+# fetch_market_data 是业务侧取数的唯一入口，背后是 43 个 loader + 降级链。
+# 此前该层 0 埋点：数据源降级、标的解析失败在日志里完全不可见，
+# 是场景 1/3/7/8（研报/回测/宏观/衍生品）的共同盲区。
+
+
+def _fetch_log(
+    status: str, kwargs: dict[str, Any], result: Any, t0: float,
+    error: BaseException | None = None,
+) -> None:
+    """行情加载埋点落盘（旁路，绝不抛异常）。"""
+    try:
+        from src.logsystem_bootstrap import safe_log_event
+
+        resolved = 0
+        unresolved: list[str] = []
+        if isinstance(result, dict):
+            for code, payload in result.items():
+                if isinstance(payload, dict) and payload.get("_unresolved"):
+                    unresolved.append(str(code))
+                else:
+                    resolved += 1
+        level = logging.INFO
+        if status != "success" or unresolved:
+            level = logging.WARNING
+        safe_log_event(
+            level,
+            f"market_data.fetch.{status}",
+            step="market_data.fetch",
+            status=status,
+            error_code=type(error).__name__ if error else None,
+            error_msg=str(error)[:200] if error else None,
+            extra={
+                "source": kwargs.get("source"),
+                "interval": kwargs.get("interval"),
+                "codes": len(kwargs.get("codes") or []),
+                "start_date": kwargs.get("start_date"),
+                "end_date": kwargs.get("end_date"),
+                "resolved": resolved,
+                "unresolved_count": len(unresolved),
+                "unresolved": ",".join(sorted(unresolved)[:10]),
+                "cost_ms": int((_time.monotonic() - t0) * 1000),
+            },
+        )
+    except Exception:
+        pass
+
+
+def _traced_fetch(func: Callable) -> Callable:
+    """行情加载埋点装饰器（P2）。
+
+    记录：数据源、区间、标的数、成功/未解析数、耗时、异常。
+    未解析标的按 WARNING 落盘，使数据源降级可被自动分析发现。
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        t0 = _time.monotonic()
+        try:
+            result = func(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - 记录后原样抛出
+            _fetch_log("failed", _effective_args(func, args, kwargs), None, t0, exc)
+            raise
+        _fetch_log("success", _effective_args(func, args, kwargs), result, t0, None)
+        return result
+
+    return wrapper
+
+
+def _effective_args(
+    func: Callable, args: tuple[Any, ...], kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """把实参与**默认值**合并，使埋点记录生效值而非仅显式传入值。
+
+    否则 ``interval`` / ``source`` 这类带默认值的参数会记成 null，
+    日志无法反映真实取数口径。
+    """
+    try:
+        bound = inspect.signature(func).bind(*args, **kwargs)
+        bound.apply_defaults()
+        return dict(bound.arguments)
+    except Exception:
+        return dict(kwargs)
 
 DEFAULT_MAX_ROWS = 250
 
@@ -176,6 +265,7 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+@_traced_fetch
 def fetch_market_data(
     *,
     codes: list[str],

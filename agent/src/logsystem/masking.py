@@ -182,12 +182,43 @@ class MaskFilter(logging.Filter):
                 record.args = self._mask_args(record.args)
             except Exception:
                 pass
-        # 对 extra 注入的字段也做脱敏
-        for field in list(getattr(record, "_logsystem_extra", {}) or {}):
-            val = getattr(record, field, None)
-            if isinstance(val, str) and field.lower() in {k.lower() for k in self.keys}:
-                setattr(record, field, self.placeholder)
+        self._mask_extra(record)
         return True
+
+    def _mask_extra(self, record: logging.LogRecord) -> None:
+        """对 extra 注入的字段做键级脱敏。
+
+        必须同时改写两处，否则会漏脱敏：
+        1. ``record._logsystem_extra`` 原始字典 —— ``_record_fields`` 直接读它
+           来还原任意额外字段（只改 record 属性对此路径无效）。
+        2. record 上的属性本身（含 ``ls_`` 前缀别名）—— 命中
+           ``_record_fields`` 的固定字段元组时走这条路。
+        """
+        keyset = {str(k).lower() for k in self.keys}
+
+        def _hit(name: Any) -> bool:
+            return str(name).lower() in keyset
+
+        extra = getattr(record, "_logsystem_extra", None)
+        if isinstance(extra, dict):
+            for field in list(extra):
+                if not _hit(field):
+                    continue
+                extra[field] = self.placeholder
+                for attr in (field, f"ls_{field}"):
+                    if hasattr(record, attr):
+                        try:
+                            setattr(record, attr, self.placeholder)
+                        except Exception:
+                            pass
+        # 兜底：未登记在 _logsystem_extra 里、但直接挂在 record 上的敏感属性
+        for field in list(getattr(record, "__dict__", ())):
+            if field == "_logsystem_extra" or not _hit(field):
+                continue
+            try:
+                setattr(record, field, self.placeholder)
+            except Exception:
+                pass
 
     def _mask_args(self, args: Any) -> Any:
         if isinstance(args, dict):
