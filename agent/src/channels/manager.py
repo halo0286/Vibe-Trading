@@ -26,8 +26,13 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 # IM 推送埋点（P2）
 # --------------------------------------------------------------------------- #
-# _send_with_retry 是全部 16 个 IM 渠道出站消息的唯一漏斗（含流式/推理/进度）。
-# 此前场景 10「IM 推送」是唯一完全无埋点的场景。
+# _send_with_retry 是**经 manager 队列**出站消息的漏斗（含流式/推理/进度）。
+#
+# 注意：它并非全部出站路径的唯一漏斗 —— 定时简报由
+# src/api/scheduled_routes.py 直接调 adapter.send_with_receipt()，不经此处
+# （且 Feishu 等适配器会覆写 send_with_receipt 而不回调 send）。该路径在
+# 投递点单独埋 channel.scheduled_push，见 scheduled_routes._scheduled_push_log。
+# 此前这里声称"唯一漏斗"是不准确的。
 
 
 

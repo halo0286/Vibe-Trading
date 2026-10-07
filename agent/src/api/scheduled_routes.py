@@ -145,9 +145,62 @@ async def _send_scheduled_briefing(
     metadata = {"force_send": True}
     if delivery_format:
         metadata["delivery_format"] = delivery_format
-    return await adapter.send_with_receipt(
-        OutboundMessage(channel=channel, chat_id=target, content=text, metadata=metadata)
+    # 场景 10「IM 推送」的定时简报走**本条路径**，不经过 manager._send_with_retry
+    # （它只被 `channel.send` 路径使用，而这里直接调 send_with_receipt；且
+    #  Feishu 等适配器会覆写 send_with_receipt 而不回调 send）。
+    # 因此在投递点单独埋 channel.push，使定时推送在日志里可见、可分析。
+    _t0 = time.monotonic()
+    try:
+        receipt = await adapter.send_with_receipt(
+            OutboundMessage(channel=channel, chat_id=target, content=text, metadata=metadata)
+        )
+    except Exception as exc:
+        _scheduled_push_log(
+            "failed", channel, target, text,
+            (time.monotonic() - _t0) * 1000.0, error=exc,
+        )
+        raise
+    _scheduled_push_log(
+        "success", channel, target, text,
+        (time.monotonic() - _t0) * 1000.0,
+        receipt_status=getattr(receipt, "status", None),
     )
+    return receipt
+
+
+def _scheduled_push_log(
+    status: str,
+    channel: str,
+    target: Any,
+    text: str,
+    cost_ms: float,
+    *,
+    receipt_status: Any = None,
+    error: BaseException | None = None,
+) -> None:
+    """定时简报投递埋点（旁路，绝不抛异常）。"""
+    try:
+        from src.channels.manager import _hash_id
+        from src.logsystem_bootstrap import safe_log_event, safe_str
+
+        safe_log_event(
+            logging.INFO if status == "success" else logging.WARNING,
+            f"channel.scheduled_push.{status}",
+            step="channel.scheduled_push",
+            status=status,
+            error_code=type(error).__name__ if error is not None else None,
+            error_msg=safe_str(error, 200) if error is not None else None,
+            extra={
+                "channel": str(channel),
+                "chat_id_hash": _hash_id(target),
+                # 只记长度不记正文：简报可能包含持仓/研究结论等私有内容
+                "content_chars": len(text or ""),
+                "receipt_status": str(receipt_status) if receipt_status else None,
+                "cost_ms": int(cost_ms),
+            },
+        )
+    except Exception:
+        pass
 
 
 def _get_scheduled_research_executor():
