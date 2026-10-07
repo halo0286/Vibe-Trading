@@ -191,6 +191,33 @@ def _day_matches(dt: date, doms: set[int] | None, months: set[int] | None, dows:
     return day_of_month_matches and day_of_week_matches
 
 
+def _sched_log(status: str, fields: dict, t0: float | None = None,
+               error: BaseException | None = None) -> None:
+    """定时研究调度埋点（场景 10 的自动化触发环节，旁路且绝不抛异常）。
+
+    此前 ``scheduled_research`` 完全没有埋点，导致「定时触发」不可见：
+    场景 10 只能看到渠道推送，看不到"谁在什么时候触发了哪个 job、
+    成功还是失败、连续失败几次"。
+    """
+    try:
+        from src.logsystem_bootstrap import safe_log_event
+
+        extra = dict(fields)
+        if t0 is not None:
+            extra["cost_ms"] = int((time.monotonic() - t0) * 1000)
+        safe_log_event(
+            logging.INFO if status in ("tick", "job_done") else logging.WARNING,
+            f"scheduled.{status}",
+            step="scheduled.research",
+            status=status,
+            error_code=type(error).__name__ if error else None,
+            error_msg=str(error)[:200] if error else None,
+            extra=extra,
+        )
+    except Exception:
+        pass
+
+
 class ScheduledResearchExecutor:
     """Background poller that dispatches due scheduled research jobs."""
 
@@ -326,15 +353,32 @@ class ScheduledResearchExecutor:
             (job for job in self._store.load().values() if is_due(job, now)),
             key=lambda job: job.next_run_at,
         )
+        if jobs:
+            _sched_log("tick", {
+                "due": len(jobs),
+                "job_ids": ",".join(str(getattr(j, "id", "")) for j in jobs[:10]),
+            })
         for job in jobs:
             # One job's unexpected persistence/lifecycle error must not starve
             # every job sorted after it, tick after tick.
+            _t0 = time.monotonic()
             try:
                 await self._run_job(job, now)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
                 logger.error("scheduled research job %s failed its run cycle", job.id, exc_info=True)
+                _sched_log("job_failed", {
+                    "job_id": str(getattr(job, "id", "")),
+                    "schedule": getattr(job, "schedule", None),
+                    "consecutive_failures": getattr(job, "consecutive_failures", None),
+                }, _t0, exc)
+            else:
+                _sched_log("job_done", {
+                    "job_id": str(getattr(job, "id", "")),
+                    "schedule": getattr(job, "schedule", None),
+                    "job_status": getattr(job, "status", None),
+                }, _t0)
 
         # The sweep is what makes delivery correct; the event hook only makes
         # it prompt. A briefing whose hook was lost to a restart, a crash

@@ -9,6 +9,7 @@ import time as _time
 from typing import Any
 
 from src.trading.profiles import list_profiles, profile_by_id
+from src.logsystem_bootstrap import traced_step
 from src.trading.types import TradingProfile
 
 RUNNER_CAPABILITY = "runner.manage.requires_mandate"
@@ -217,6 +218,43 @@ def check_connection(profile_id: str | None = None, **overrides: Any) -> dict[st
     return _remote_status(profile)
 
 
+#: 只读操作允许落盘的字段（绝不记录金额/账号等财务隐私）
+_READ_SUMMARY_KEYS = ("profile_id", "connector", "environment", "transport",
+                      "status", "error", "source", "symbol", "interval")
+_READ_COUNT_KEYS = ("positions", "orders", "accounts", "history", "history_deals",
+                    "items", "rows", "data", "cash_flow", "financials")
+
+
+def _read_summary(args: tuple, kwargs: dict, result: Any) -> dict:
+    """只读操作摘要：只记规模与状态，不记任何财务数值。
+
+    账户余额、持仓数量、成交明细都可能属于用户隐私，落盘会扩大泄露面；
+    这里只保留「有没有、有多少条」以及 profile/连接器等非敏感元数据。
+    """
+    out: dict = {}
+    if isinstance(result, dict):
+        for key in _READ_SUMMARY_KEYS:
+            value = result.get(key)
+            if isinstance(value, (str, int, float, bool)) and not isinstance(value, bool):
+                out[key] = value
+        for key in _READ_COUNT_KEYS:
+            value = result.get(key)
+            if isinstance(value, (list, dict, tuple)):
+                out[f"{key}_count"] = len(value)
+    return out
+
+
+def _traced_read(step: str) -> Any:
+    """交易**只读**操作埋点装饰器（场景 6 的查询路径）。
+
+    此前只覆盖 place_order / cancel_order（写操作），
+    ``connector account/positions/quote/orders`` 等查询路径完全没有埋点，
+    导致场景 6 只有「下单」可见，「查持仓/查账户」不可见。
+    """
+    return traced_step(f"trading.{step}", summarize=_read_summary)
+
+
+@_traced_read("get_account")
 def get_account(profile_id: str | None = None, **overrides: Any) -> dict[str, Any]:
     """Read account summary for a connector profile."""
     profile = profile_by_id(profile_id)
@@ -240,6 +278,7 @@ def get_account(profile_id: str | None = None, **overrides: Any) -> dict[str, An
     )
 
 
+@_traced_read("get_accounts")
 def get_accounts(profile_id: str | None = None, **overrides: Any) -> dict[str, Any]:
     """List the broker accounts a remote MCP profile can be scoped to.
 
@@ -265,6 +304,7 @@ def get_accounts(profile_id: str | None = None, **overrides: Any) -> dict[str, A
     )
 
 
+@_traced_read("get_positions")
 def get_positions(profile_id: str | None = None, **overrides: Any) -> dict[str, Any]:
     """Read positions for a connector profile."""
     profile = profile_by_id(profile_id)
@@ -288,6 +328,7 @@ def get_positions(profile_id: str | None = None, **overrides: Any) -> dict[str, 
     )
 
 
+@_traced_read("get_open_orders")
 def get_open_orders(
     profile_id: str | None = None,
     *,
@@ -322,6 +363,7 @@ def get_open_orders(
     return _call_remote(profile, "orders", _account_arg(overrides))
 
 
+@_traced_read("get_quote")
 def get_quote(
     symbol: str,
     profile_id: str | None = None,
@@ -407,6 +449,7 @@ def search_instruments(
     )
 
 
+@_traced_read("get_history")
 def get_history(
     symbol: str,
     profile_id: str | None = None,
@@ -482,6 +525,7 @@ def get_history(
 # ---------------------------------------------------------------------------
 
 
+@_traced_read("get_rehab")
 def get_rehab(symbol: str, profile_id: str | None = None, **overrides: Any) -> dict[str, Any]:
     """Dividend / split adjustment factors for ``symbol``."""
     profile = profile_by_id(profile_id)
@@ -497,6 +541,7 @@ def get_rehab(symbol: str, profile_id: str | None = None, **overrides: Any) -> d
     )
 
 
+@_traced_read("get_capital_flow")
 def get_capital_flow(
     symbol: str,
     profile_id: str | None = None,
@@ -522,6 +567,7 @@ def get_capital_flow(
     )
 
 
+@_traced_read("get_capital_distribution")
 def get_capital_distribution(symbol: str, profile_id: str | None = None, **overrides: Any) -> dict[str, Any]:
     """Latest capital in-flow vs out-flow snapshot for ``symbol``."""
     profile = profile_by_id(profile_id)
@@ -537,6 +583,7 @@ def get_capital_distribution(symbol: str, profile_id: str | None = None, **overr
     )
 
 
+@_traced_read("get_history_deals")
 def get_history_deals(
     start: str,
     end: str,
@@ -564,6 +611,7 @@ def get_history_deals(
     )
 
 
+@_traced_read("get_acc_cash_flow")
 def get_acc_cash_flow(
     clearing_date: str,
     profile_id: str | None = None,
@@ -586,6 +634,7 @@ def get_acc_cash_flow(
     )
 
 
+@_traced_read("get_financials")
 def get_financials(
     symbol: str,
     profile_id: str | None = None,
@@ -613,6 +662,7 @@ def get_financials(
     )
 
 
+@_traced_read("get_earnings_calendar")
 def get_earnings_calendar(
     profile_id: str | None = None,
     *,
@@ -780,7 +830,6 @@ def _traced_order(step: str) -> Any:
         return wrapper
 
     return deco
-
 
 @_traced_order("trading.place_order")
 def place_order(
