@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -33,6 +34,11 @@ from .trace import (
 # KeyError: "Attempt to overwrite '<name>' in LogRecord"）。业务字段中
 # args / module / lineno / funcName 等会与之冲突，统一加 "ls_" 前缀，
 # 由 _RotatingPidFileHandler._record_fields 还原为原始字段名。
+#: 本系统生成的日志文件名：`{pid}_{YYYY-MM-DD}_{序号}.log`。
+#: 保留期清理**只**允许删除匹配它的文件（见 _cleanup_old_logs）。
+_OWN_LOG_NAME = re.compile(r"^\d+_\d{4}-\d{2}-\d{2}_\d+\.log$")
+
+
 _LOGRECORD_RESERVED = frozenset({
     "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
     "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
@@ -312,6 +318,14 @@ class GlobalLogger:
             self._cleanup_old_logs()
 
     def _cleanup_old_logs(self) -> None:
+        """按保留期清理**本系统自己生成**的日志文件。
+
+        安全约束：只删除匹配 `{pid}_{YYYY-MM-DD}_{序号}.log` 的文件。
+        历史缺陷是用 `root.glob("*.log")` 删除该目录下**所有**过期 `.log` ——
+        只要用户把别的日志放在同一目录（VIBE_LOG_DIR 可指向任意目录），
+        就会被连带删除。实测：在目录里放一个 30 天前的 user-precious.log，
+        仅执行 `cli --help` 就会把它删掉（数据丢失，且由只读命令触发）。
+        """
         import time as _t
 
         root = Path(self.config.log_dir)
@@ -319,6 +333,8 @@ class GlobalLogger:
             return
         cutoff = _t.time() - self.config.retention_days * 86400
         for f in root.glob("*.log"):
+            if not _OWN_LOG_NAME.match(f.name):
+                continue  # 不是本系统生成的文件，绝不删除
             try:
                 if f.stat().st_mtime < cutoff:
                     f.unlink()

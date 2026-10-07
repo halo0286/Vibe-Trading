@@ -217,6 +217,23 @@ def _collect_banner_stats(*, refresh: bool = False) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+
+#: argparse 的信息型开关（帮助/版本）。
+_INFO_FLAGS = frozenset({"-h", "--help", "-V", "--version"})
+
+
+def _is_informational_invocation(argv: Sequence[str]) -> bool:
+    """是否为纯信息型调用（`--help` / `--version`）。
+
+    这类调用只打印帮助或版本，不执行业务，因此不应初始化日志系统、不应创建
+    日志目录。取首个或末个 token 判断 —— 二者是 argparse 接受帮助/版本开关的
+    常见位置；其余情况一律按业务调用处理（宁可多初始化，也不漏日志）。
+    """
+    if not argv:
+        return False
+    return argv[0] in _INFO_FLAGS or argv[-1] in _INFO_FLAGS
+
+
 def _is_interactive_invocation(argv: Sequence[str]) -> bool:
     """Decide whether this invocation should drive the interactive loop.
 
@@ -1482,12 +1499,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     # api_server 与 mcp_server 调用 init_logging()，CLI 完全未初始化日志系统，
     # 导致 CLI 触发的业务**不产生任何日志**（task4 的文档化工作流恰好都用 CLI）。
     # 这里与其它两个入口保持一致：显式初始化，失败不影响命令执行。
-    try:
-        from src.logsystem_bootstrap import init_logging
+    # 纯信息型调用（--help / --version）不初始化日志系统。
+    # 原因：init_logging 会**急切创建**日志目录（config.ensure_dir），
+    # 并触发保留期清理 —— 一个只读的帮助命令不应该产生任何文件系统副作用。
+    # 未知子命令无法预判（argparse 之后才报错），但保留期清理已收窄为
+    # 只删除本系统自有文件名（见 logsystem.logger._OWN_LOG_NAME），不会误删用户文件。
+    if not _is_informational_invocation(raw_argv):
+        try:
+            from src.logsystem_bootstrap import init_logging
 
-        init_logging()
-    except Exception:
-        pass
+            init_logging()
+        except Exception:
+            pass
 
     # One-time move of pre-#904 code-relative state into the runtime root.
     # A failed migration must never block the CLI.
