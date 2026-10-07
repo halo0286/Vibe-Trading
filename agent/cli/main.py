@@ -1607,23 +1607,32 @@ def main(argv: Optional[list[str]] = None) -> int:
     #     同一会话跨调用会拿到**不同** business_id，日志无法按会话关联，
     #     且每次调用多产出一份 analysis_<随机 id>.json。
     # 允许用 VIBE_BUSINESS_ID 显式指定（便于验证脚本注入已知 id）。
-    if raw_argv and not _has_own_session_identity(raw_argv):
+    # 注意：空 argv（`echo hi | vibe-trading`）也会走 legacy 跑一次 agent，
+    # 因此同样需要 business_id —— 此前 `if raw_argv and ...` 把它排除掉了。
+    _business_id = ""
+    if not _has_own_session_identity(raw_argv):
         try:
             import uuid as _uuid
 
-            from src.logsystem import set_trace_context
-
-            set_trace_context(
-                business_id=(os.environ.get("VIBE_BUSINESS_ID") or "").strip()
-                or f"cli-{_uuid.uuid4().hex[:12]}"
-            )
+            _business_id = (
+                os.environ.get("VIBE_BUSINESS_ID") or ""
+            ).strip() or f"cli-{_uuid.uuid4().hex[:12]}"
         except Exception:
-            pass
+            _business_id = ""
 
     # 用 try/finally 保证任何退出方式（正常返回 / SystemExit / 异常）都会
     # 等待异步分析完成。此前 `_legacy.main()` 抛出的异常会**跳过** drain，
     # 该轮会话的分析线程随即被进程退出杀死，闭环静默失效。
+    #
+    # business_id 用 trace_scope（而不是 set_trace_context）：后者会在
+    # **进程级**留下永不重置的 contextvar，`main()` 返回后仍返回 CLI 的
+    # business_id（cli.main 是可被当库调用的，测试里就这么用）。
     try:
+        if _business_id:
+            from src.logsystem import trace_scope
+
+            with trace_scope(business_id=_business_id):
+                return int(_legacy.main(raw_argv))
         return int(_legacy.main(raw_argv))
     finally:
         _drain_analysis_best_effort()

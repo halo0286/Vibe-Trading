@@ -25,6 +25,12 @@ API 分层（P1 收敛）
 from .config import LogConfig
 from .constants import KEYWORD_DICT, SENSITIVE_KEYS_DEFAULT
 from .masking import mask, mask_value, MaskFilter
+from .verdict import (
+    SUCCESS_VERDICTS,
+    business_outcome,
+    result_error,
+    safe_str,
+)
 from .trace import (
     TraceContext,
     get_business_id,
@@ -64,6 +70,11 @@ CORE_API = (
 
 #: 高级 API —— 完全可导入，供二次开发/测试使用，不进入 ``__all__``。
 ADVANCED_API = (
+    # 埋点状态判定（建议用允许清单而非否定清单）与安全字符串化
+    "SUCCESS_VERDICTS",
+    "business_outcome",
+    "result_error",
+    "safe_str",
     "logsystem_active",   # 埋点短路：日志未初始化时跳过记录工作
     # 兼容入口（历史项目在用，保留可导入）
     "log_business_event",

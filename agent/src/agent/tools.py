@@ -80,7 +80,7 @@ def _tool_outcome(result: Any) -> str:
     解析失败一律按 success 处理 —— 埋点分类绝不能反过来影响业务判定。
     """
     try:
-        from src.logsystem_bootstrap import SUCCESS_VERDICTS, business_outcome
+        from src.logsystem import SUCCESS_VERDICTS, business_outcome
     except Exception:  # pragma: no cover - 引导失败时退回保守判定
         return "success"
 
@@ -109,15 +109,20 @@ def _log_tool_call(
 ) -> None:
     """记录一次工具业务调用（入参/出参/异常/耗时）。失败时静默。"""
     try:
-        # 注意：必须使用 logsystem 自己的 logger（其 handler 挂在 "logsystem"
-        # 命名空间下）。若传入项目自有 logger，日志会走 root 而无法落到
-        # {pid}_{date}_{seq}.log，造成静默丢失。
+        # 被动守卫（与 safe_log_event 同一语义）：日志系统未初始化时直接返回。
+        # 否则下面的 get_logger("tools") 会在**未配置时自动 configure()** ——
+        # 创建 logs/ 目录、改变进程全局日志配置，对"只是调用了一次工具"的
+        # 调用方（含测试）是意外副作用。
         from src.logsystem import (
             get_business_id,
             get_logger,
             log_business_event,
+            logsystem_active,
             trace_scope,
         )
+
+        if not logsystem_active():
+            return
 
         _logsystem_logger = get_logger("tools")
         cost_ms = (time.perf_counter() - started) * 1000.0
@@ -141,7 +146,7 @@ def _log_tool_call(
             # 载荷式失败（工具返回 {"status": ...} 而不抛异常）：
             # 从载荷里提取状态与原因，让失败可诊断。
             try:
-                from src.logsystem_bootstrap import result_error
+                from src.logsystem import result_error
 
                 payload = result
                 if isinstance(payload, str) and len(payload) <= _OUTCOME_PARSE_LIMIT:
@@ -153,14 +158,12 @@ def _log_tool_call(
             except Exception:
                 pass
 
-        # P0-2：统一走 logsystem_bootstrap.current_business_id()
-        # （trace_scope 优先，其次 LLM session_id 兜底），避免调用点各自兜底。
-        try:
-            from src.logsystem_bootstrap import current_business_id
-
-            _bid = current_business_id()
-        except Exception:
-            _bid = get_business_id()
+        # 只依赖 logsystem 本身，**不**导入应用层的 logsystem_bootstrap：
+        # 后者在被导入时会注册全局 business_id 解析器，对"只用 ToolRegistry"
+        # 的嵌入方是意外副作用。此处 trace_scope 只用于给嵌套埋点绑定父作用域；
+        # 即使 _bid 为 None，紧接着的 log_business_event 仍会经
+        # resolve_business_id() 走已注册的兜底来源（LLM 会话等），不丢信息。
+        _bid = get_business_id()
 
         import contextlib
 

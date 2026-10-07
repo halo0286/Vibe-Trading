@@ -251,6 +251,7 @@ class ScheduledResearchExecutor:
         enabled: bool = True,
         max_consecutive_failures: int | None = None,
         retry_base_delay_ms: int | None = None,
+        heartbeat_every_ticks: int = 60,
         retry_max_delay_ms: int | None = None,
         briefing_reader: "BriefingReader | None" = None,
         channel_sender: "ChannelSender | None" = None,
@@ -293,6 +294,9 @@ class ScheduledResearchExecutor:
         self._tick_interval_ms = tick_interval_ms
         self._now_fn = now_fn
         self._enabled = enabled
+        #: 空闲多少个 tick 后记一条心跳（使"卡死"与"无任务"可区分）
+        self._heartbeat_every = max(1, int(heartbeat_every_ticks))
+        self._idle_ticks = 0
         self._max_consecutive_failures = (
             max_consecutive_failures
             if max_consecutive_failures is not None
@@ -327,11 +331,17 @@ class ScheduledResearchExecutor:
     def start(self) -> None:
         """Start the background loop.
 
-        Idempotent. When disabled, this is a no-op.
+        Idempotent. When disabled, this is a no-op —— 但会记一条
+        ``scheduled.disabled``，否则"被禁用"与"一直空闲"在日志里无法区分。
         """
-        if not self._enabled or self.is_running:
+        if not self._enabled:
+            _sched_log("disabled", {"reason": "executor disabled by config"},
+                       business_id="sched-executor")
+            return
+        if self.is_running:
             return
         self._stopping = False
+        self._idle_ticks = 0
         self.recover_stale_running()
         self._wakeup = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -378,6 +388,14 @@ class ScheduledResearchExecutor:
                 "due": len(jobs),
                 "job_ids": ",".join(str(getattr(j, "id", "")) for j in jobs[:10]),
             }, business_id="sched-tick")
+        else:
+            # 心跳：没有任何到期任务时也**周期性**记一条（默认每 60 个 tick），
+            # 否则"调度线程卡死"与"当前没有任务"在日志里完全一样。
+            self._idle_ticks += 1
+            if self._idle_ticks >= self._heartbeat_every:
+                self._idle_ticks = 0
+                _sched_log("heartbeat", {"idle_ticks": self._heartbeat_every},
+                           business_id="sched-executor")
         for job in jobs:
             # One job's unexpected persistence/lifecycle error must not starve
             # every job sorted after it, tick after tick.
