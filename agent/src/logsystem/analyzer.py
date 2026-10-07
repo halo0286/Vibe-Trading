@@ -230,8 +230,18 @@ def run_analysis(
         log_business_event(
             logger, logging.INFO,
             f"[analysis] {report['summary']}",
-            step="auto_analysis", status=report["status"],
-            extra={"analysis_report": json.dumps(report, ensure_ascii=False)},
+            step="auto_analysis",
+            # 这一步的成败是"分析是否完成"，**不是**"被分析的业务是否失败"。
+            # 此前直接落 report["status"]：分析明明成功产出报告却记
+            # `status=failed`（而 level 硬编码 INFO，自相矛盾），同时把被分析
+            # 业务的失败**重复计入** auto_analysis，使 error_count 虚高。
+            status="success",
+            extra={
+                "analysis_report": json.dumps(report, ensure_ascii=False),
+                "analyzed_status": report.get("status"),
+                "analyzed_error_count": report.get("error_count"),
+                "analyzed_total_logs": report.get("total_logs"),
+            },
         )
     if report_path:
         # 原子写：先写同目录临时文件再 os.replace。

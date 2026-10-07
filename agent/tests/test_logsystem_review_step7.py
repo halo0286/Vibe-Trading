@@ -278,3 +278,56 @@ def test_fetch_log_warns_when_nothing_resolved(tmp_path):
     _fetch_log("success", {"codes": ["A", "B"]}, {"_unresolved": ["A", "B"]}, 0.0)
 
     assert "level=WARNING" in _lines(tmp_path)[0]
+
+
+# --------------------------------------------------------------------------- #
+# 收尾两个一致性缺陷（C-4 同类 + H-8 同类）
+# --------------------------------------------------------------------------- #
+
+def test_auto_analysis_reports_its_own_status(tmp_path):
+    """分析这一步的成败是"分析是否完成"，不是"被分析的业务是否失败"。
+
+    此前直接落 report["status"]：分析成功产出报告却记 `status=failed`
+    （level 硬编码 INFO，自相矛盾），并把业务失败**重复计入** auto_analysis，
+    使 error_count 虚高。
+    """
+    import re
+
+    from src.logsystem import LogConfig, configure, log_event, run_analysis
+
+    configure(LogConfig(log_dir=str(tmp_path), level="INFO",
+                        enable_async_analysis=False))
+    log_event(logging.INFO, "biz", step="order", status="failed",
+              error_code="X", error_msg="boom")
+    run_analysis(str(tmp_path))
+
+    line = [l for l in _lines(tmp_path) if "auto_analysis" in l][0]
+    fields = {}
+    for k, v in re.findall(r'(\w+)=("[^"]*"|\S+)', line):
+        fields[k] = v[1:-1] if v.startswith('"') and v.endswith('"') else v
+
+    assert fields["status"] == "success", fields
+    assert fields.get("analyzed_status") == "failed", fields
+
+
+def test_auto_analysis_not_double_counted_as_error(tmp_path):
+    """auto_analysis 不应把被分析业务的失败重复计成自己的错误。"""
+    from src.logsystem import LogConfig, configure, log_event, run_analysis
+    from src.logsystem.analyzer import LogAnalyzer
+
+    configure(LogConfig(log_dir=str(tmp_path), level="INFO",
+                        enable_async_analysis=False))
+    log_event(logging.INFO, "biz", step="order", status="failed", error_msg="boom")
+    run_analysis(str(tmp_path))
+
+    report = LogAnalyzer(str(tmp_path)).analyze()
+    # 只有那一条业务失败算错误；auto_analysis 自身是 success
+    assert report["error_count"] == 1, report
+
+
+def test_agent_session_payload_failure_has_reason(tmp_path):
+    """载荷式失败（如 empty_model_response）必须带出原因。"""
+    fields = _agent_fields(tmp_path, "success",
+                           {"status": "failed", "reason": "empty_model_response: x"})
+    assert fields["status"] == "failed", fields
+    assert "empty_model_response" in (fields.get("error_msg") or ""), fields

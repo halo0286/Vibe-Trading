@@ -965,13 +965,23 @@ def _agent_log(
             emitted, level = "success", logging.INFO
         else:
             emitted, level = "failed", logging.WARNING
+        # 失败必须带原因：异常路径用 safe_str(error)，**载荷式失败**（如
+        # empty_model_response 返回 {"status":"failed","reason":...}）此前
+        # 完全没有原因字段，只剩 status=failed。
+        err_code = result.get("error_code") if isinstance(result, dict) else None
+        err_msg = safe_str(error, 200) if error is not None else None
+        if emitted == "failed" and isinstance(result, dict):
+            err_code = err_code or final_status
+            err_msg = err_msg or safe_str(
+                result.get("reason") or result.get("error"), 200
+            ) or None
         safe_log_event(
             level,
             f"agent.session.{emitted}",
             step="agent.session",
             status=emitted,
-            error_code=result.get("error_code") if isinstance(result, dict) else None,
-            error_msg=safe_str(error, 200) if error is not None else None,
+            error_code=err_code,
+            error_msg=err_msg,
             extra=fields,
         )
     except Exception:
