@@ -226,7 +226,12 @@ import random as _random  # P-2 fix: top-level import instead of per-call
 
 
 class _RateLimiter:
-    """按 (定位信息) 维度做高频日志限流：窗口内超过阈值则按采样率抽样/丢弃。
+    """按 (定位信息) 维度做高频日志限流。
+
+    语义：窗口内某 key 的记录数不超过 ``rate_limit_max`` 时全部放行；**超过
+    之后按 ``sample_rate`` 概率抽样放行**，其余丢弃。因此 ``sample_rate=1.0``
+    等于"超限后不再限制"（历史缺陷：for_prod 用了 1.0，却宣称已限流）。
+    被丢弃的条数累计在 ``dropped`` 上，便于诊断与测试。
 
     使用进程内共享状态（多线程安全）；多进程各自维护自己的限流器，
     与 pid 隔离的文件名一致，天然按进程隔离。
@@ -240,6 +245,8 @@ class _RateLimiter:
         self._buckets: Dict[Any, list] = {}
         self._lock = threading.Lock()
         self._total_entries: int = 0
+        #: 因超限被丢弃的记录数（诊断用；不可再写日志，否则递归）
+        self.dropped: int = 0
 
     def allow(self, key: Any) -> bool:
         cfg = self.config
@@ -250,10 +257,14 @@ class _RateLimiter:
             bucket = [t for t in self._buckets.get(key, []) if now - t < cfg.rate_limit_window_seconds]
             self._buckets[key] = bucket
             if len(bucket) >= cfg.rate_limit_max:
-                # 超出阈值：按采样率放行
+                # 超出阈值：按采样率抽样放行，其余丢弃并计数
                 if _random.random() < cfg.sample_rate:
+                    # 桶本身也要封顶，否则超限 key 的 bucket 会随每条记录增长
+                    if len(bucket) > cfg.rate_limit_max:
+                        del bucket[:-cfg.rate_limit_max]
                     bucket.append(now)
                     return True
+                self.dropped += 1
                 return False
             bucket.append(now)
             self._total_entries += 1

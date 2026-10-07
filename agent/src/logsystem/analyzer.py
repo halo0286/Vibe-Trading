@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from . import logger as _logger_module
 from .logger import get_logger, log_business_event
 
 _analysis_tasks: Dict[str, threading.Thread] = {}
@@ -183,11 +184,33 @@ class LogAnalyzer:
         return report
 
 
+
+def resolve_file_format(file_format: Optional[str] = None) -> str:
+    """决定解析格式：显式指定优先，否则**跟随当前配置**。
+
+    历史缺陷：``run_analysis`` 默认写死 ``"kv"``，而 ``for_prod()`` 用
+    ``file_format="json"`` —— 生产档下分析器按 kv 解析 json 行，一条也读不出，
+    报告恒为"未找到匹配日志"（正是自动分析闭环被以为修好的那个症状）。
+    """
+    if file_format in ("kv", "json"):
+        return file_format
+    try:
+        # 必须经模块属性读取：`from .logger import _configured` 绑定的是
+        # 导入瞬间的值（None），配置之后不会更新。
+        cfg = getattr(_logger_module._configured, "config", None)
+        fmt = getattr(cfg, "file_format", None)
+        if fmt in ("kv", "json"):
+            return fmt
+    except Exception:
+        pass
+    return "kv"
+
+
 def run_analysis(
     log_dir: str,
     business_id: Optional[str] = None,
     trace_id: Optional[str] = None,
-    file_format: str = "kv",
+    file_format: Optional[str] = None,
     *,
     report_path: Optional[str] = None,
     sink: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -197,7 +220,7 @@ def run_analysis(
     - report_path: 若提供，将报告写入该 JSON 文件。
     - sink: 可选回调（写数据库/消息队列），返回 None。
     """
-    analyzer = LogAnalyzer(log_dir, file_format)
+    analyzer = LogAnalyzer(log_dir, resolve_file_format(file_format))
     report = analyzer.analyze(business_id=business_id, trace_id=trace_id)
     # D-3 fix: wrap analysis log in trace_scope so it carries business_id
     from .trace import trace_scope
@@ -239,7 +262,7 @@ def run_analysis_async(
     log_dir: str,
     business_id: Optional[str] = None,
     trace_id: Optional[str] = None,
-    file_format: str = "kv",
+    file_format: Optional[str] = None,
     *,
     report_path: Optional[str] = None,
     sink: Optional[Callable[[Dict[str, Any]], None]] = None,

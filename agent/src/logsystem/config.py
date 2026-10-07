@@ -109,7 +109,13 @@ class LogConfig:
 
     @classmethod
     def for_prod(cls, log_dir: Optional[str] = None, **overrides: object) -> "LogConfig":
-        """生产档：INFO、终端只留 WARNING、JSON 结构化、长保留 + 限流。"""
+        """生产档：INFO、终端只留 WARNING、JSON 结构化、长保留 + 限流。
+
+        ``sample_rate`` 的语义是**超过 rate_limit_max 之后放行的比例**：
+        旧的 1.0 表示"超限后仍全部放行"，使 rate_limit_max 形同虚设 ——
+        实测阈值 5/60s 写入 200 条却落盘 200 行。生产档取 0.1，
+        在风暴时保留抽样样本（可观测）而不是无限制写入。
+        """
         cfg = cls(
             log_dir=log_dir or "./logs",
             level="INFO",
@@ -117,7 +123,7 @@ class LogConfig:
             file_format="json",
             rotation_bytes=100 * 1024 * 1024,
             retention_days=30,
-            sample_rate=1.0,
+            sample_rate=0.1,
             rate_limit_window_seconds=1.0,
             rate_limit_max=2000,
             enable_async_analysis=True,
