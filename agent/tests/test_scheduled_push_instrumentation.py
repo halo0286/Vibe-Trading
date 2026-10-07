@@ -68,15 +68,25 @@ def _install_fake_host(adapter):
 
 @pytest.fixture()
 def fake_host():
-    created = []
+    """临时安装假 api_server，并在结束后**恢复原模块**。
+
+    绝不能直接 `sys.modules.pop("api_server")`：真实模块此前若已被导入，
+    pop 会把它一并删掉，后续所有 API 测试（upload / system_routes /
+    swarm routes / state_migration_wiring …）都会拿到空模块而**大面积失败**。
+    实测：本文件最初用 pop，整套测试多出 95 项失败（12 → 107）；
+    改为保存/恢复后回到 12 项（均为预存 nh3/reportlab 环境依赖）。
+    """
+    saved = sys.modules.get("api_server")
 
     def _make(adapter):
-        created.append("api_server")
         return _install_fake_host(adapter)
 
     yield _make
-    for name in created:
-        sys.modules.pop(name, None)
+
+    if saved is not None:
+        sys.modules["api_server"] = saved
+    else:
+        sys.modules.pop("api_server", None)
 
 
 def test_scheduled_briefing_emits_push_event(tmp_path, fake_host):
@@ -155,9 +165,7 @@ def test_missing_manager_does_not_log_success(tmp_path, fake_host):
     from src.api import scheduled_routes as SR
 
     _configure(tmp_path)
-    host = types.ModuleType("api_server")
-    host._channel_manager = None
-    sys.modules["api_server"] = host
+    fake_host(None)  # _install_fake_host 会把 _channel_manager 设为该值
 
     with pytest.raises(RuntimeError):
         asyncio.run(SR._send_scheduled_briefing("feishu", "t", "b", None))
