@@ -222,6 +222,42 @@ def _collect_banner_stats(*, refresh: bool = False) -> Dict[str, Any]:
 _INFO_FLAGS = frozenset({"-h", "--help", "-V", "--version"})
 
 
+
+
+#: 自带稳定会话身份、或长驻的子命令：不得注入进程级 business_id。
+_OWN_SESSION_SUBCOMMANDS = frozenset({"serve", "dev", "chat", "resume"})
+#: 自带会话/续跑身份的开关前缀。
+_OWN_SESSION_FLAG_PREFIXES = ("--session", "--continue")
+
+
+def _has_own_session_identity(argv: Sequence[str]) -> bool:
+    """该调用是否自带会话身份（或为长驻服务）——是则不应注入 business_id。
+
+    ``chat`` / ``resume`` / ``--session-chat`` / ``--continue`` 都携带稳定的
+    session_id（或 run_id），AgentLoop 会回落到它；进程级注入只会把同一会话
+    拆成多个 business_id，破坏跨调用的链路关联。
+    """
+    if not argv:
+        return False
+    if argv[0] in _OWN_SESSION_SUBCOMMANDS:
+        return True
+    return any(a.startswith(_OWN_SESSION_FLAG_PREFIXES) for a in argv)
+
+
+def _drain_analysis_best_effort() -> None:
+    """等待本进程发起的异步日志分析完成（失败绝不影响命令退出码）。
+
+    分析线程是 daemon，进程退出会直接杀死它 —— 不 drain 就永远不产出报告。
+    同时该函数不吞掉正在传播的异常（只在 finally 中调用，不做 except）。
+    """
+    try:
+        from src.logsystem_bootstrap import drain_analysis
+
+        drain_analysis()
+    except Exception:
+        pass
+
+
 def _is_informational_invocation(argv: Sequence[str]) -> bool:
     """是否为纯信息型调用（`--help` / `--version`）。
 
@@ -1532,13 +1568,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         # Strip the optional ``chat`` token + any ``--max-iter`` flag so
         # the new loop can read them directly without re-parsing argv.
         max_iter = _extract_max_iter(raw_argv, default=50)
-        return _interactive_loop(max_iter)
+        try:
+            return _interactive_loop(max_iter)
+        finally:
+            _drain_analysis_best_effort()
 
     # Handle ``vibe-trading resume <session-id>`` — enter the interactive
     # loop with a specific session loaded, bypassing the legacy dispatcher.
     if len(raw_argv) == 2 and raw_argv[0] == "resume":
         max_iter = _extract_max_iter(raw_argv, default=50)
-        return _interactive_loop(max_iter=max_iter, resume_session_id=raw_argv[1])
+        try:
+            return _interactive_loop(max_iter=max_iter, resume_session_id=raw_argv[1])
+        finally:
+            _drain_analysis_best_effort()
 
     # Delegate every other path to the legacy dispatcher.
     try:
@@ -1557,10 +1599,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     # 若不在 CLI 层注入，这些命令产生的业务日志 business_id 全为空，
     # 无法按业务关联（task4 维度 3「业务日志是否携带 business_id」）。
     #
-    # 长驻服务（serve / mcp / dev）除外：它们必须按请求/会话各自取 id，
-    # 不能在进程级固定一个 business_id。
+    # 只对**无自带会话身份的一次性命令**注入进程级 business_id。
+    # 以下情况必须跳过，否则会**破坏**会话 identity：
+    #   * 长驻服务 serve / dev —— 必须按请求/会话各自取 id；
+    #   * chat / resume / --session-chat / --continue —— 自带稳定的
+    #     session_id 或 run_id，AgentLoop 会回落到它。若在此注入一次性 id，
+    #     同一会话跨调用会拿到**不同** business_id，日志无法按会话关联，
+    #     且每次调用多产出一份 analysis_<随机 id>.json。
     # 允许用 VIBE_BUSINESS_ID 显式指定（便于验证脚本注入已知 id）。
-    if raw_argv and raw_argv[0] not in {"serve", "mcp", "dev"}:
+    if raw_argv and not _has_own_session_identity(raw_argv):
         try:
             import uuid as _uuid
 
@@ -1573,19 +1620,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         except Exception:
             pass
 
-    _rc = int(_legacy.main(raw_argv))
-
-    # 一次性命令退出前必须等待异步日志分析完成：分析线程是 daemon，
-    # 进程退出会直接杀死它，导致「业务完成后自动分析闭环」永不产出报告
-    # （实测 11 个场景 0 份 analysis_*.json）。
+    # 用 try/finally 保证任何退出方式（正常返回 / SystemExit / 异常）都会
+    # 等待异步分析完成。此前 `_legacy.main()` 抛出的异常会**跳过** drain，
+    # 该轮会话的分析线程随即被进程退出杀死，闭环静默失效。
     try:
-        from src.logsystem_bootstrap import drain_analysis
-
-        drain_analysis()
-    except Exception:
-        pass
-
-    return _rc
+        return int(_legacy.main(raw_argv))
+    finally:
+        _drain_analysis_best_effort()
 
 
 def _extract_max_iter(argv: Sequence[str], *, default: int) -> int:

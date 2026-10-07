@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
+import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +21,8 @@ from typing import Any, Callable, Dict, List, Optional
 from .logger import get_logger, log_business_event
 
 _analysis_tasks: Dict[str, threading.Thread] = {}
+#: 保护 _analysis_tasks 的 check-then-act（见 run_analysis_async）
+_analysis_lock = threading.Lock()
 
 
 class LogAnalyzer:
@@ -207,8 +211,22 @@ def run_analysis(
             extra={"analysis_report": json.dumps(report, ensure_ascii=False)},
         )
     if report_path:
-        Path(report_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(report_path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 原子写：先写同目录临时文件再 os.replace。
+        # CLI 退出时分析线程随时可能被杀死，直接 write_text 会留下**截断的
+        # 半截 JSON**，下游读到就报解析错误。
+        target = Path(report_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(report, ensure_ascii=False, indent=2)
+        tmp = target.with_name(f".{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            tmp.write_text(payload, encoding="utf-8")
+            os.replace(tmp, target)
+        except OSError:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
     if sink is not None:
         try:
             sink(report)
@@ -231,20 +249,30 @@ def run_analysis_async(
     返回 threading.Thread；若已存在相同 scope 的任务则复用。
     """
     key = business_id or trace_id or "_all_"
-    if key in _analysis_tasks and _analysis_tasks[key].is_alive():
-        return _analysis_tasks[key]
 
     def _run() -> None:
         run_analysis(log_dir, business_id, trace_id, file_format, report_path=report_path, sink=sink)
 
-    t = threading.Thread(target=_run, name=f"loganalysis-{key}", daemon=True)
-    _analysis_tasks[key] = t
-    t.start()
-    return t
+    # check-then-act 必须在锁内完成：否则并发同键调用会各自新建线程，
+    # 只有一个进 _analysis_tasks，其余**未被跟踪** —— drain_analysis_tasks
+    # 等不到它们，而且多个线程并发写同一个 report_path 会互相覆盖。
+    with _analysis_lock:
+        # 顺手回收已结束的任务，避免 _analysis_tasks 随不同 business_id
+        # 无界增长（长驻服务场景）。
+        for _k, _t in list(_analysis_tasks.items()):
+            if not _t.is_alive():
+                _analysis_tasks.pop(_k, None)
+        existing = _analysis_tasks.get(key)
+        if existing is not None and existing.is_alive():
+            return existing
+        t = threading.Thread(target=_run, name=f"loganalysis-{key}", daemon=True)
+        _analysis_tasks[key] = t
+        t.start()
+        return t
 
 
 def drain_analysis_tasks(timeout: float = 15.0) -> int:
-    """等待并回收已发起的异步分析任务，返回**加入等待**的任务数。
+    """等待并回收已发起的异步分析任务，返回**已完成**的任务数。
 
     存在的原因：``run_analysis_async`` 起的是 daemon 线程。对**一次性进程**
     （CLI 命令）而言，命令返回后进程立即退出，daemon 线程被直接杀死 ——
@@ -253,10 +281,16 @@ def drain_analysis_tasks(timeout: float = 15.0) -> int:
 
     调用方应在进程退出前调用本函数，使闭环真正落地。
     """
+    deadline = time.monotonic() + max(0.0, timeout)
     threads = [t for t in list(_analysis_tasks.values()) if t.is_alive()]
     for t in threads:
+        # 所有 join 共享同一个预算：N 个任务的最坏等待是 timeout，
+        # 而不是 N × timeout（此前长时间阻塞 CLI 退出 / 服务停机）。
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         try:
-            t.join(timeout=timeout)
+            t.join(timeout=remaining)
         except Exception:
             pass
     done = sum(1 for t in threads if not t.is_alive())
