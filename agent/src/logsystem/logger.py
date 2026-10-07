@@ -37,6 +37,10 @@ from .trace import (
 #: 本系统生成的日志文件名：`{pid}_{YYYY-MM-DD}_{序号}.log`。
 #: 保留期清理**只**允许删除匹配它的文件（见 _cleanup_old_logs）。
 _OWN_LOG_NAME = re.compile(r"^\d+_\d{4}-\d{2}-\d{2}_\d+\.log$")
+#: 本系统生成的自动分析报告文件名（analyzer 以 ``analysis_<business_id>.json``
+#: 命名）。保留期此前只清理 ``*.log``，于是每次 CLI 调用都会留下一份报告且
+#: **永不回收**（business_id 每次都不同 → 无界累积）。
+_OWN_ANALYSIS_NAME = re.compile(r"^analysis_.+\.json$")
 
 
 _LOGRECORD_RESERVED = frozenset({
@@ -247,6 +251,10 @@ class _RateLimiter:
         self._total_entries: int = 0
         #: 因超限被丢弃的记录数（诊断用；不可再写日志，否则递归）
         self.dropped: int = 0
+        #: 距上次 compact 新增的记录数。必须与 _total_entries 分开：后者是
+        #: 当前存活条目数，压缩后仍可能高于阈值，若用它当触发条件会导致
+        #: **每次记录都全量扫描** _buckets（阈值调低时实测 60 行触发 51 次压缩）。
+        self._since_compact: int = 0
 
     def allow(self, key: Any) -> bool:
         cfg = self.config
@@ -256,22 +264,28 @@ class _RateLimiter:
         with self._lock:
             bucket = [t for t in self._buckets.get(key, []) if now - t < cfg.rate_limit_window_seconds]
             self._buckets[key] = bucket
+            allowed = True
             if len(bucket) >= cfg.rate_limit_max:
                 # 超出阈值：按采样率抽样放行，其余丢弃并计数
                 if _random.random() < cfg.sample_rate:
-                    # 桶本身也要封顶，否则超限 key 的 bucket 会随每条记录增长
-                    if len(bucket) > cfg.rate_limit_max:
-                        del bucket[:-cfg.rate_limit_max]
+                    # 桶封顶：超限 key 的 bucket 不得随每条记录无界增长
+                    if len(bucket) >= cfg.rate_limit_max:
+                        del bucket[: len(bucket) - cfg.rate_limit_max + 1]
                     bucket.append(now)
-                    return True
-                self.dropped += 1
-                return False
-            bucket.append(now)
+                else:
+                    self.dropped += 1
+                    allowed = False
+            else:
+                bucket.append(now)
+            # 记账与压缩放在**分支之外**：此前只在未超限分支累加，一旦某 key
+            # 超限，计数就冻结、_buckets 里的过期 key 永不回收（长驻服务下
+            # 无界增长，且同一 key 的 bucket 也会一直变长）。
             self._total_entries += 1
-            # P-2: periodic compact to prevent unbounded memory growth
-            if self._total_entries >= self._COMPACT_THRESHOLD:
+            self._since_compact += 1
+            if self._since_compact >= self._COMPACT_THRESHOLD:
                 self._compact(now, cfg.rate_limit_window_seconds)
-            return True
+                self._since_compact = 0
+            return allowed
 
     def _compact(self, now: float, window: float) -> None:
         """Remove expired entries from all buckets to reclaim memory."""
@@ -353,6 +367,15 @@ class GlobalLogger:
         for f in root.glob("*.log"):
             if not _OWN_LOG_NAME.match(f.name):
                 continue  # 不是本系统生成的文件，绝不删除
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except OSError:
+                pass
+        # 自动分析报告同样按保留期回收（只删本系统自有命名）
+        for f in root.glob("analysis_*.json"):
+            if not _OWN_ANALYSIS_NAME.match(f.name):
+                continue
             try:
                 if f.stat().st_mtime < cutoff:
                     f.unlink()
