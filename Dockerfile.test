@@ -1,0 +1,75 @@
+# ============================================================================
+# 测试镜像（test stage）—— 只用于在容器里跑测试，不参与生产发布
+# ============================================================================
+# 与 `Dockerfile`（运行时镜像）**互不影响**：本文件不改动生产构建。
+#
+# 对齐对象：.github/workflows/test.yml 的 test job
+#   pip install -e ".[dev,openbb,stats,anthropic]"
+#   bash tools/ci_grep_gates.sh
+#   pytest tools/test_ci_env_var_gate.py -q
+#   pytest --ignore=agent/tests/e2e_backtest --ignore=agent/tests/test_e2e_harness_v2.py \
+#          --cov=agent --cov-report=term-missing --cov-report=xml --tb=short -q
+#
+# 本镜像默认只装 [dev]（pytest/ruff/black 等），够跑 unit 与大部分测试；
+# 需要完全对齐 CI 时用 `--build-arg EXTRAS=dev,openbb,stats,anthropic` 重建。
+#
+# 用法（在仓库根目录执行）：
+#   # 1) 构建
+#   docker build -f Dockerfile.test -t vibe-trading-test:dev .
+#
+#   # 1b) 无法直连 Docker Hub 时（如国内网络）：先从镜像源拉取并打标签，再覆盖基镜像
+#   docker pull docker.m.daocloud.io/library/python@sha256:e031123e3d85762b141ad1cbc56452ba69c6e722ebf2f042cc0dc86c47c0d8b3
+#   docker tag  <上述镜像 ID>  python:3.11-slim
+#   docker build -f Dockerfile.test --build-arg BASE_IMAGE=python:3.11-slim -t vibe-trading-test:dev .
+#   （默认 BASE_IMAGE 保留上游锁定 digest，因此本文件对上游仍然准确）
+#
+#   # 2) 收集测试（确认环境是否正确，不真跑）
+#   docker run --rm -v "$PWD":/app -w /app vibe-trading-test:dev \
+#     pytest --collect-only -q
+#
+#   # 3) 跑标记为 unit 的（快、无网络）
+#   docker run --rm -v "$PWD":/app -w /app vibe-trading-test:dev \
+#     pytest -m unit -q
+#
+#   # 4) 对齐 CI 跑全量（排除 e2e）
+#   docker run --rm -v "$PWD":/app -w /app vibe-trading-test:dev \
+#     pytest --ignore=agent/tests/e2e_backtest \
+#            --ignore=agent/tests/test_e2e_harness_v2.py \
+#            --cov=agent --cov-report=term-missing --tb=short -q
+#
+# 说明：运行期把源码挂载到 /app，因此测的**始终是当前工作区的代码**，
+#       而不是构建时烘焙进去的那份；镜像只负责提供依赖环境。
+#       conftest.py 会把 HOME 重定向到测试沙箱，不会写宿主目录。
+# ============================================================================
+
+# 基镜像可覆盖：默认与生产 Dockerfile 完全一致（同一 digest）
+ARG BASE_IMAGE=python:3.11-slim@sha256:e031123e3d85762b141ad1cbc56452ba69c6e722ebf2f042cc0dc86c47c0d8b3
+
+FROM ${BASE_IMAGE} AS test
+
+# 不装系统包：实测基镜像已自带 bash / grep / ca-certificates / pip，
+# 足以跑 tools/*.sh 门禁与 pytest（省去约 119MB 与十几分钟 apt 下载）。
+# 若某个测试确实需要 git，再取消下面这行注释：
+# RUN apt-get update && apt-get install -y --no-install-recommends git \
+#  && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# 先只拷依赖声明与包目录：依赖不变时可复用这一层缓存
+COPY pyproject.toml README.md LICENSE ./
+COPY agent/ agent/
+
+# 依赖范围与 PyPI 源均可覆盖：
+#   --build-arg EXTRAS=dev,openbb,stats,anthropic   （完全对齐 CI）
+#   --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple  （慢网提速）
+ARG EXTRAS=dev
+ARG PIP_INDEX_URL=https://pypi.org/simple
+RUN pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" -e ".[${EXTRAS}]"
+
+# 运行期由 -v 挂载覆盖 /app；这里保留一份构建时的源码作为兜底
+CMD ["pytest", "-q"]
