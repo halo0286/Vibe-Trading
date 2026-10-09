@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-import os
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
+
+from src.config.accessor import get_env_value
 
 from .constants import SENSITIVE_KEYS_DEFAULT
 
@@ -177,7 +178,7 @@ class LogConfig:
         支持 ``LOG_PROFILE=dev|prod|test`` 选择配置档，其余单项环境变量
         在其之上覆盖。
         """
-        profile = os.getenv("LOG_PROFILE")
+        profile = get_env_value("LOG_PROFILE")
         if profile:
             try:
                 cfg = cls.for_profile(profile)
@@ -190,14 +191,20 @@ class LogConfig:
                 cfg = cls()
         else:
             cfg = cls()
-        if os.getenv("LOG_DIR"):
-            cfg.log_dir = os.environ["LOG_DIR"]
-        if os.getenv("LOG_ROTATION_BYTES"):
-            cfg.rotation_bytes = int(os.environ["LOG_ROTATION_BYTES"])
-        if os.getenv("LOG_LEVEL"):
-            cfg.level = os.environ["LOG_LEVEL"]
-        if os.getenv("LOG_RETENTION_DAYS"):
-            cfg.retention_days = int(os.environ["LOG_RETENTION_DAYS"])
+        # 环境变量读取统一走 src.config 访问器（CI 门禁 gate e：
+        # 不允许在 config 层之外直接 os.getenv / os.environ[...]）。
+        log_dir = get_env_value("LOG_DIR")
+        if log_dir:
+            cfg.log_dir = log_dir
+        rotation_bytes = get_env_value("LOG_ROTATION_BYTES")
+        if rotation_bytes:
+            cfg.rotation_bytes = int(rotation_bytes)
+        level = get_env_value("LOG_LEVEL")
+        if level:
+            cfg.level = level
+        retention_days = get_env_value("LOG_RETENTION_DAYS")
+        if retention_days:
+            cfg.retention_days = int(retention_days)
         cfg.__post_init__()
         return cfg
 
