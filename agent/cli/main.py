@@ -1614,8 +1614,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         try:
             import uuid as _uuid
 
+            from src.config.accessor import get_env_value
+
             _business_id = (
-                os.environ.get("VIBE_BUSINESS_ID") or ""
+                get_env_value("VIBE_BUSINESS_ID") or ""
             ).strip() or f"cli-{_uuid.uuid4().hex[:12]}"
         except Exception:
             _business_id = ""

@@ -65,11 +65,12 @@ def init_logging(
     （如 /usr/lib/python3.12/logs），既常不可写又与项目其它部分不一致。
     """
     global _inited
+    from src.config.accessor import get_env_value
     from src.logsystem.logger import _configured as _already_configured
 
     if _inited or _already_configured is not None:
         return
-    root = log_dir or os.environ.get("VIBE_LOG_DIR") or str(_default_log_dir())
+    root = log_dir or get_env_value("VIBE_LOG_DIR") or str(_default_log_dir())
     try:
         configure(
             LogConfig(
@@ -168,8 +169,10 @@ def finish_and_analyze(
     sync: bool = False,
 ):
     """业务完成后触发自动分析（见 task2 analyzer 闭环）。"""
+    from src.config.accessor import get_env_value
+
     bid = business_id or resolve_business_id()
-    _dir = os.environ.get("VIBE_LOG_DIR") or str(
+    _dir = get_env_value("VIBE_LOG_DIR") or str(
         Path(__file__).resolve().parents[2] / "logs"
     )
     report = report_path or os.path.join(_dir, f"analysis_{bid or 'all'}.json")

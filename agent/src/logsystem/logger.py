@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from src.config.accessor import get_env_value
+
 from .config import LogConfig
 from .masking import MaskFilter
 from .trace import (
@@ -328,7 +330,7 @@ class GlobalLogger:
         # stdout 变成「若干人类可读日志行 + JSON」，json.loads(stdout) 直接
         # JSONDecodeError —— 破坏了机器可读输出的契约。
         # 需要旧行为的场景可设 VIBE_LOG_CONSOLE_STREAM=stdout。
-        _stream_name = os.environ.get("VIBE_LOG_CONSOLE_STREAM", "stderr").strip().lower()
+        _stream_name = get_env_value("VIBE_LOG_CONSOLE_STREAM", "stderr").strip().lower()
         _console_stream = sys.stdout if _stream_name == "stdout" else sys.stderr
         console = logging.StreamHandler(stream=_console_stream)
         console.setLevel(cfg.console_level or cfg.level)
