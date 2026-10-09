@@ -942,7 +942,7 @@ class BaseEngine(ABC):
         Returns:
             Metrics dictionary.
         """
-        trace_started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        trace_started_at = datetime.now(timezone.utc)
         codes = config.get("codes", [])
         interval = config.get("interval", "1D")
         extra_fields = config.get("extra_fields") or None
@@ -1195,7 +1195,11 @@ class BaseEngine(ABC):
             card_warnings.append(config["_run_card_caliber_warning"])
         if config.get("_run_card_annualisation_warning"):
             card_warnings.append(config["_run_card_annualisation_warning"])
-        from backtest.run_card import write_run_card
+        from backtest.run_card import trace_timestamps, write_run_card
+
+        # 时间戳成对产生并保证有序：墙上时钟可能被回调（NTP/恢复），
+        # 逆序会让 run card 校验失败、拖垮整轮健康的回测。
+        trace_started_iso, trace_ended_iso = trace_timestamps(trace_started_at)
         write_run_card(
             run_dir,
             config,
@@ -1207,8 +1211,8 @@ class BaseEngine(ABC):
                 {
                     "tool": "backtest",
                     "args": config,
-                    "started_at": trace_started_at,
-                    "ended_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "started_at": trace_started_iso,
+                    "ended_at": trace_ended_iso,
                     "status": "ok",
                     "result": m,
                 }

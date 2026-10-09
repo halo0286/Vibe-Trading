@@ -407,6 +407,42 @@ def _normalize_artifact_refs(artifact_refs: Sequence[Mapping[str, Any]] | None) 
     return refs
 
 
+def trace_timestamps(
+    started_at: datetime, ended_at: datetime | None = None
+) -> tuple[str, str]:
+    """Tool-trace timestamps as UTC ``Z`` strings, **guaranteed to be ordered**.
+
+    Traces are stamped from the wall clock, which can step *backwards* (NTP
+    adjustment, VM/host resume). The run card rejects a reversed pair
+    (``trace ends before it starts``), so a healthy run could fail purely because
+    the clock moved between the two stamps. Clamp the end to the start here — at
+    the point the trace is produced — instead of emitting an invalid pair.
+
+    ``_normalize_tool_traces`` still validates strictly; this only ensures the
+    producers hand it an ordered pair.
+
+    Args:
+        started_at: When the traced operation began. Naive values are taken as UTC.
+        ended_at: When it ended; defaults to "now".
+
+    Returns:
+        ``(started_at, ended_at)`` as UTC ISO-8601 strings with a ``Z`` suffix.
+    """
+
+    def _fmt(value: datetime) -> str:
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    if ended_at is None:
+        ended_at = datetime.now(timezone.utc)
+    start_cmp = started_at if started_at.tzinfo else started_at.replace(tzinfo=timezone.utc)
+    end_cmp = ended_at if ended_at.tzinfo else ended_at.replace(tzinfo=timezone.utc)
+    if end_cmp < start_cmp:
+        ended_at = started_at
+    return _fmt(started_at), _fmt(ended_at)
+
+
 def _normalize_tool_traces(tool_traces: Sequence[Mapping[str, Any]] | None) -> list[dict[str, Any]]:
     traces = []
     for trace in tool_traces or []:

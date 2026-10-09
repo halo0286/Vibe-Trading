@@ -210,7 +210,7 @@ def run_options_backtest(
     Raises:
         SystemExit: When no data is fetched.
     """
-    trace_started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    trace_started_at = datetime.now(timezone.utc)
     codes = config.get("codes", [])
     start_date = config.get("start_date", "")
     end_date = config.get("end_date", "")
@@ -622,7 +622,11 @@ def run_options_backtest(
     pd.DataFrame(greeks_records).to_csv(out / "greeks.csv", index=False)
     pd.DataFrame([metrics]).to_csv(out / "metrics.csv", index=False)
 
-    from backtest.run_card import write_run_card
+    from backtest.run_card import trace_timestamps, write_run_card
+
+    # 时间戳成对产生并保证有序：墙上时钟可能被回调（NTP/恢复），
+    # 逆序会让 run card 校验失败、拖垮整轮健康的回测。
+    trace_started_iso, trace_ended_iso = trace_timestamps(trace_started_at)
     write_run_card(
         run_dir,
         config,
@@ -634,8 +638,8 @@ def run_options_backtest(
             {
                 "tool": "backtest",
                 "args": config,
-                "started_at": trace_started_at,
-                "ended_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "started_at": trace_started_iso,
+                "ended_at": trace_ended_iso,
                 "status": "ok",
                 "result": metrics,
             }
