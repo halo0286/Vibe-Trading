@@ -213,3 +213,88 @@ def test_non_string_message_is_masked(logdir):
 
     log_event(logging.INFO, {"password": "DICT-MSG-PW"})
     assert "DICT-MSG-PW" not in _read(logdir)
+
+
+# --------------------------------------------------------------------------- #
+# C-6：%-模板 + 掩码顺序错误 → 整条记录静默丢失
+#
+# 已复现缺陷
+# ----------
+# ``MaskFilter.filter`` 原先**先掩码 ``record.msg``、后处理 ``record.args``**。
+# 当消息是 %-模板（``logger.info("password=%s", secret)``）时，``_mask_kv`` 的值扫描
+# 不把 ``%`` 当分隔符 → **把 ``%s`` 占位符本身**替换成 ``***``；而 ``record.args`` 仍在。
+# 随后 ``LogRecord.getMessage()`` 执行 ``"password=***" % (secret,)`` →
+# ``TypeError: not all arguments converted during string formatting`` →
+# handler 吞掉异常 → **整条记录不落盘**（审计日志静默丢失）。
+#
+# ⚠️ 与本文档早先的 **C-1**（``_format_file`` 不转义换行 → 日志注入）是**不同**缺陷。
+#
+# 修复：**先格式化再掩码**（``mask(record.getMessage())`` 后清空 ``record.args``）。
+# 这同时补上了 ``_mask_args`` 注释里记的「值级脱敏」缺口 —— 只有格式化后
+# ``password=`` 与它的值才相邻，``_mask_kv`` 才看得到。
+#
+# 注：``log_event()`` 的参数是**关键字专属**、不接 %-args，所以这里用裸 logger
+# （也正是缺陷的真实触发路径）。
+# --------------------------------------------------------------------------- #
+
+def _emit(logdir: str, template: str, *args) -> None:
+    """用裸 logger 发一条 %-模板日志（C-6 的触发路径）。"""
+    from src.logsystem import get_logger
+
+    get_logger("probe").info(template, *args)
+
+
+def test_percent_template_with_sensitive_key_is_still_written(logdir):
+    """C-6 核心：含敏感键的 %-模板必须**能落盘**，且值被掩码。"""
+    import logging
+    from src.logsystem import LogConfig, configure
+
+    configure(LogConfig(log_dir=logdir, file_format="json", enable_async_analysis=False))
+    _emit(logdir, "password=%s", "hunter2")
+    for h in logging.getLogger("logsystem").handlers:
+        try:
+            h.flush()
+        except Exception:
+            pass
+
+    body = _read(logdir)
+    assert body.strip(), "含 sensitive key 的 %-模板记录被丢弃（C-6 回归）"
+    assert "hunter2" not in body, "值未脱敏"
+    assert "***" in body, "未出现掩码占位符"
+
+
+def test_percent_template_ordinary_message_is_not_dropped(logdir):
+    """C-6 的影响面：**普通**消息只要含 ``token=`` 一类模式也曾整条丢失。"""
+    import logging
+    from src.logsystem import LogConfig, configure
+
+    configure(LogConfig(log_dir=logdir, file_format="json", enable_async_analysis=False))
+    _emit(logdir, "user=alice token=%s done", "SECRET123")
+    for h in logging.getLogger("logsystem").handlers:
+        try:
+            h.flush()
+        except Exception:
+            pass
+
+    body = _read(logdir)
+    assert body.strip(), "普通消息因模板含敏感键而被丢弃（C-6 回归）"
+    assert "SECRET123" not in body, "值级脱敏未生效"
+    assert "user=alice" in body and "done" in body, "非敏感部分应保留"
+
+
+def test_percent_template_non_sensitive_still_works(logdir):
+    """不能误伤：普通 %-模板照常落盘、内容完整。"""
+    import logging
+    from src.logsystem import LogConfig, configure
+
+    configure(LogConfig(log_dir=logdir, file_format="json", enable_async_analysis=False))
+    _emit(logdir, "count=%d items for %s", 42, "AAPL")
+    for h in logging.getLogger("logsystem").handlers:
+        try:
+            h.flush()
+        except Exception:
+            pass
+
+    lines = _lines(logdir)
+    assert len(lines) == 1, lines
+    assert "count=42 items for AAPL" in lines[0]

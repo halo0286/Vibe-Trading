@@ -5,6 +5,21 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Masking no longer drops `%`-style log records (C-6).** `MaskFilter.filter`
+  masked `record.msg` *before* handling `record.args`. For a template such as
+  `logger.info("password=%s", secret)`, `_mask_kv` treats `%` as a value
+  character, replaced the `%s` placeholder itself, and left `record.args` in
+  place — so `LogRecord.getMessage()` raised
+  `TypeError: not all arguments converted during string formatting`, the handler
+  swallowed it, and **the whole record was silently dropped**. Ordinary messages
+  that merely contained `token=`/`password=` were lost too. `filter` now formats
+  first and masks the formatted text (`mask(record.getMessage())`, then clears
+  `record.args`), which also closes the value-level masking gap noted in
+  `_mask_args`. The pre-existing per-arg path is kept only as a fallback when
+  `getMessage()` itself fails. Reported by `ocr scan`; reproduced and fixed.
+
 ### Added
 
 - **Log field contract shared by producer and consumer.** `logsystem.constants`

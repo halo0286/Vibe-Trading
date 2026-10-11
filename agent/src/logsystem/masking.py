@@ -214,8 +214,9 @@ def is_sensitive_key(name: Any, keyset: Any) -> bool:
 class MaskFilter(logging.Filter):
     """logging.Filter：对每条日志消息在写入前后动脱敏。
 
+    - 有 ``record.args`` 时：**先格式化再掩码**（见 ``filter`` 的顺序说明）。
     - 对 msg（str）套用 mask()。
-    - 对 record.args 中的敏感映射做键级脱敏。
+    - 对 record.args 中的敏感映射做键级脱敏（仅用于 ``getMessage()`` 失败的兜底路径）。
     """
 
     def __init__(self, sensitive_keys: Iterable[str], placeholder: str = "***"):
@@ -226,17 +227,48 @@ class MaskFilter(logging.Filter):
         self._keyset = frozenset(str(k).lower() for k in self.keys)
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if isinstance(record.msg, str):
+        """就地脱敏。**顺序很关键** —— 先格式化，再掩码。
+
+        历史缺陷（**C-6**，与本文档早先的 C-1「换行未转义导致日志注入」是**不同**的缺陷）：
+        原实现先对 ``record.msg`` 调 ``mask()``、再处理
+        ``record.args``。当消息是 ``%`` 模板时（如 ``logger.info("password=%s", secret)``），
+        ``_mask_kv`` 的值扫描不把 ``%`` 当分隔符，于是把 **``%s`` 占位符本身**当作值替换掉：
+        ``record.msg`` 变成 ``"password=***"`` 而 ``record.args`` 仍在。随后
+        ``LogRecord.getMessage()`` 执行 ``"password=***" % (secret,)`` →
+        ``TypeError: not all arguments converted`` → handler 吞掉异常 →
+        **整条记录不落盘**（审计日志静默丢失，且**普通消息只要含 ``token=`` 一类模式就触发**）。
+
+        修复做法是**调换顺序**：先用 ``getMessage()`` 得到最终文本，再对**格式化后的文本**
+        做掩码，并清空 ``record.args``。这同时补上了 ``_mask_args`` 注释里记的
+        "值级脱敏"缺口 —— 因为只有格式化之后，``password=`` 与它的值才相邻，
+        ``_mask_kv`` 才看得到。``getMessage()`` 失败（模板与 args 不匹配，属调用方错误）
+        时才退回旧的逐项掩码路径，保证**不因脱敏而多丢记录**。
+        """
+        if record.args:
+            try:
+                record.msg = mask(record.getMessage(), self.keys, self.placeholder)
+                # 已格式化进 msg：清空 args，避免 getMessage() 二次替换（正是 C-1 的成因）
+                record.args = ()
+            except Exception:
+                # 兜底：模板与 args 不匹配。逐项掩码 + 掩码模板本身，行为退化为修复前，
+                # 但至少不会因为掩码而额外破坏记录（C-6 兜底）。
+                try:
+                    record.args = self._mask_args(record.args)
+                except Exception:
+                    pass
+                if isinstance(record.msg, str):
+                    record.msg = mask(record.msg, self.keys, self.placeholder)
+                elif record.msg is not None:
+                    try:
+                        record.msg = mask(str(record.msg), self.keys, self.placeholder)
+                    except Exception:
+                        pass
+        elif isinstance(record.msg, str):
             record.msg = mask(record.msg, self.keys, self.placeholder)
         elif record.msg is not None:
             # 非 str 的 msg（dict/list/异常对象）此前完全绕过掩码。
             try:
                 record.msg = mask(str(record.msg), self.keys, self.placeholder)
-            except Exception:
-                pass
-        if record.args:
-            try:
-                record.args = self._mask_args(record.args)
             except Exception:
                 pass
         self._mask_exception(record)
