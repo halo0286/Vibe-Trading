@@ -126,11 +126,13 @@ def test_help_does_not_create_log_dir(tmp_path, flag):
     log_dir = tmp_path / "should-not-exist"
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
-        [os.path.join(_REPO_ROOT, ".pylibs", "lib", "python3.12", "site-packages"), _AGENT_DIR]
+        [_AGENT_DIR]
     )
     env["VIBE_LOG_DIR"] = str(log_dir)
-    env.setdefault("HOME", "/home/halo/workspace/.vt-home")
-    env.setdefault("VIBE_TRADING_HOME", "/home/halo/workspace/.vt-home/.vibe-trading")
+    # 旧值指向工作区根的 .vt-home（已于 2026-10-09 删除）；改用 tmp_path 真正隔离，
+    # 既不再引用不存在的路径，也不会在测试时把文件写回工作区。
+    env["HOME"] = str(tmp_path / "home")
+    env["VIBE_TRADING_HOME"] = str(tmp_path / "home" / ".vibe-trading")
 
     proc = subprocess.run(
         [sys.executable, "-m", "cli", flag],
@@ -150,11 +152,13 @@ def test_help_does_not_delete_user_files(tmp_path):
 
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
-        [os.path.join(_REPO_ROOT, ".pylibs", "lib", "python3.12", "site-packages"), _AGENT_DIR]
+        [_AGENT_DIR]
     )
     env["VIBE_LOG_DIR"] = str(log_dir)
-    env.setdefault("HOME", "/home/halo/workspace/.vt-home")
-    env.setdefault("VIBE_TRADING_HOME", "/home/halo/workspace/.vt-home/.vibe-trading")
+    # 旧值指向工作区根的 .vt-home（已于 2026-10-09 删除）；改用 tmp_path 真正隔离，
+    # 既不再引用不存在的路径，也不会在测试时把文件写回工作区。
+    env["HOME"] = str(tmp_path / "home")
+    env["VIBE_TRADING_HOME"] = str(tmp_path / "home" / ".vibe-trading")
 
     proc = subprocess.run(
         [sys.executable, "-m", "cli", "--help"],
