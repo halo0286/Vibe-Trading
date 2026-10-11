@@ -247,7 +247,7 @@ class MaskFilter(logging.Filter):
         if record.args:
             try:
                 record.msg = mask(record.getMessage(), self.keys, self.placeholder)
-                # 已格式化进 msg：清空 args，避免 getMessage() 二次替换（正是 C-1 的成因）
+                # 已格式化进 msg：清空 args，避免 getMessage() 二次替换（正是 C-6 的成因）
                 record.args = ()
             except Exception:
                 # 兜底：模板与 args 不匹配。逐项掩码 + 掩码模板本身，行为退化为修复前，
