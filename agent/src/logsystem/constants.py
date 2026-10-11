@@ -152,4 +152,93 @@ KEYWORD_DICT: tuple[dict, ...] = (
         "description": "异常堆栈（脱敏后）。",
         "example": "Traceback (most recent call last): ...",
     },
+    {
+        "key": "exc_text",
+        "type": "str",
+        "required": False,
+        "description": "logging 格式化后的异常文本（由 LogRecord.exc_text 还原）。",
+        "example": "ValueError: bad symbol",
+    },
+    {
+        "key": "business_done",
+        "type": "bool",
+        "required": False,
+        "description": "业务是否已结束（由 LoggedContext 在退出时写入），供分析器判断链路完整性。",
+        "example": True,
+    },
+    {
+        "key": "message",
+        "type": "str",
+        "required": True,
+        "description": "日志正文（由 LogRecord.getMessage() 格式化，始终写入）。",
+        "example": "fetch_quote done in 12.3ms",
+    },
 )
+
+# --------------------------------------------------------------------------- #
+# 字段契约：**生产端（logger.py）与消费端（analyzer.py）共用同一份清单**
+#
+# 为什么单列这组常量：此前生产端在 ``logger.py`` 里内联一个元组、消费端在
+# ``analyzer.py`` 里散写若干字符串字面量，两边各写一遍 —— 改名字段时没有
+# 任何编译期/测试期报错，消费端会**静默忽略**该字段。实测：生产端产出 14 个
+# 业务字段，而分析器只读 8 个，且 KEYWORD_DICT 漏收了 ``exc_text`` /
+# ``business_done``（事实标准已漂移）。
+#
+# 现在两边都从本文件派生，并由
+# ``agent/tests/test_logsystem_profile_contracts.py`` 的字段级契约测试守住。
+# --------------------------------------------------------------------------- #
+
+#: 基础字段：由 ``_RotatingPidFileHandler._record_fields`` 自动写入。
+BASE_FIELDS: tuple[str, ...] = (
+    "timestamp",
+    "pid",
+    "level",
+    "module",
+    "function",
+    "line",
+)
+
+#: 业务字段：由装饰器/上下文管理器或 ``log_business_event`` 写入。
+#: ⚠️ 修改这里即修改**生产端实际写出**的字段（``logger.py`` 直接引用本常量）。
+BUSINESS_FIELDS: tuple[str, ...] = (
+    "business_id",
+    "trace_id",
+    "span_id",
+    "step",
+    "status",
+    "cost_ms",
+    "error_code",
+    "error_msg",
+    "args",
+    "result",
+    "exception_type",
+    "stack_trace",
+    "exc_text",
+    "business_done",
+)
+
+#: 正文字段：始终存在。
+MESSAGE_FIELD: str = "message"
+
+#: 生产端会写出的**全部**字段。契约测试的基准集合。
+PRODUCED_FIELDS: tuple[str, ...] = BASE_FIELDS + BUSINESS_FIELDS + (MESSAGE_FIELD,)
+
+#: 消费端（``analyzer.py``）**声明消费**的字段。
+#: 必须始终保持 ``set(ANALYZED_FIELDS) <= set(PRODUCED_FIELDS)`` —— 由契约测试强制。
+#: 分析报告会对照本清单报告"实际读到 / 缺失"的字段，漂移在**运行时也可见**。
+ANALYZED_FIELDS: tuple[str, ...] = (
+    "level",
+    "message",
+    "business_id",
+    "trace_id",
+    "step",
+    "status",
+    "cost_ms",
+    "error_code",
+    "error_msg",
+    "exception_type",
+    "stack_trace",
+)
+
+#: ``KEYWORD_DICT`` 覆盖的字段名（事实标准的口径）。
+KEYWORD_FIELDS: tuple[str, ...] = tuple(str(d["key"]) for d in KEYWORD_DICT)

@@ -131,3 +131,134 @@ def test_resolve_file_format_defaults_to_kv_without_config(monkeypatch):
     monkeypatch.setattr(analyzer._logger_module, "_configured", None)
     assert analyzer.resolve_file_format() == "kv"
     assert analyzer.resolve_file_format("json") == "json"
+
+
+# --------------------------------------------------------------------------- #
+# 字段级契约：生产端（logger.py）与消费端（analyzer.py）必须共用同一份清单
+#
+# 已复现缺陷（改造前）
+# --------------------
+# - ``logger.py`` 内联一个 14 项业务字段元组赋给 ``for k in (...)``；
+#   ``analyzer.py`` 另写 8 个字符串字面量读取字段。两边各写一遍：
+#   **改名字段时没有任何编译期/测试期报错，消费端会静默忽略该字段。**
+# - ``constants.KEYWORD_DICT``（注释自称"日志结构化字段的事实标准"）漏收了
+#   ``exc_text`` / ``business_done`` —— **标准本身已与生产端漂移**。
+#
+# 现在：两边都从 ``constants`` 派生；下面三条测试守住契约。
+# --------------------------------------------------------------------------- #
+
+def test_analyzed_fields_are_subset_of_produced_fields():
+    """消费端声明消费的字段，必须都能被生产端写出。"""
+    from src.logsystem.constants import ANALYZED_FIELDS, PRODUCED_FIELDS
+
+    orphan = sorted(set(ANALYZED_FIELDS) - set(PRODUCED_FIELDS))
+    assert not orphan, (
+        f"分析器要读这些字段，但生产端不会写出：{orphan}；"
+        f"请同步 constants.BUSINESS_FIELDS / BASE_FIELDS"
+    )
+
+
+def test_keyword_dict_covers_all_produced_fields():
+    """KEYWORD_DICT（字段事实标准）必须覆盖生产端写出的全部字段。"""
+    from src.logsystem.constants import KEYWORD_FIELDS, PRODUCED_FIELDS
+
+    undocumented = sorted(set(PRODUCED_FIELDS) - set(KEYWORD_FIELDS))
+    assert not undocumented, (
+        f"生产端会写出这些字段，但 KEYWORD_DICT 里没有登记：{undocumented}"
+    )
+
+
+def test_producer_writes_only_contract_fields(tmp_path):
+    """端到端：生产端实际写出的字段必须落在契约内，且基础字段齐全。"""
+    import json as _json
+
+    from src.logsystem import LogConfig, configure, log_event, trace_scope
+    from src.logsystem.constants import BASE_FIELDS, MESSAGE_FIELD, PRODUCED_FIELDS
+
+    configure(LogConfig(log_dir=str(tmp_path), file_format="json",
+                        enable_async_analysis=False))
+    with trace_scope(business_id="b-1", trace_id="t-1"):
+        log_event(logging.INFO, "order placed", step="order", status="success",
+                  extra={"cost_ms": 12.5, "business_done": True})
+
+    lines = _lines(tmp_path)
+    assert lines, "生产端没有写出任何日志"
+    rec = _json.loads(lines[-1])
+
+    outside = sorted(set(rec) - set(PRODUCED_FIELDS))
+    assert not outside, f"生产端写出了契约外的字段：{outside}（请登记到 constants）"
+
+    must_have = set(BASE_FIELDS) | {MESSAGE_FIELD}
+    missing = sorted(must_have - set(rec))
+    assert not missing, f"基础字段缺失：{missing}"
+
+    # 业务字段确实按契约里的名字写出（两侧名字一致才可能命中）
+    for key in ("business_id", "trace_id", "step", "status", "cost_ms", "business_done"):
+        assert key in rec, f"契约字段 {key} 未被生产端写出"
+
+
+def test_report_consumes_error_detail_fields(tmp_path):
+    """排障字段（error_msg / exception_type / stack_trace）必须进入分析报告。
+
+    改造前：分析器只读 8 个字段，这三个**产出但从不被分析消费** ——
+    报告里只有 error_code 分布，排障时还得手工抠原始日志。
+    """
+    from src.logsystem import LogConfig, configure, log_event, run_analysis, trace_scope
+
+    configure(LogConfig(log_dir=str(tmp_path), file_format="json",
+                        enable_async_analysis=False))
+    with trace_scope(business_id="b-err"):
+        log_event(logging.ERROR, "order failed", step="order", status="failed",
+                  error_code="E_BOOM", error_msg="upstream timeout",
+                  extra={"exception_type": "TimeoutError",
+                         "stack_trace": "Traceback (most recent call last):\n  ...\nTimeoutError"})
+
+    report = run_analysis(str(tmp_path))
+    assert report["total_logs"] == 1, report
+    assert report["error_count"] == 1
+    assert report["exception_types"] == {"TimeoutError": 1}, report["exception_types"]
+
+    detail = report["error_details"][0]
+    assert detail["exception_type"] == "TimeoutError"
+    assert detail["error_code"] == "E_BOOM"
+    assert detail["count"] == 1
+    assert detail["sample_error_msg"] == "upstream timeout"
+    assert "Traceback" in detail["sample_stack_trace"]
+
+    # 契约可见性：这几个字段确实被观测到 → 不应出现在缺失清单里
+    observed = set(report["fields_observed"])
+    assert {"error_msg", "exception_type", "stack_trace"} <= observed, report["fields_observed"]
+
+
+def test_report_flags_missing_contract_fields(tmp_path):
+    """只写最小日志时，契约中未出现的字段必须显式列出（漂移在运行时可见）。"""
+    from src.logsystem import LogConfig, configure, log_event, run_analysis
+
+    configure(LogConfig(log_dir=str(tmp_path), file_format="json",
+                        enable_async_analysis=False))
+    log_event(logging.INFO, "minimal")
+
+    report = run_analysis(str(tmp_path))
+    missing = set(report["missing_contract_fields"])
+    # 最小日志不会带这些排障字段
+    assert {"exception_type", "stack_trace", "error_msg"} <= missing, missing
+    # 但基础字段必须已观测到
+    assert {"level", "message"} <= set(report["fields_observed"])
+    assert any("契约字段缺失" in s for s in report["suggestions"])
+
+
+def test_stack_trace_sample_is_clipped(tmp_path):
+    """超长 stack_trace 必须被截断，不能把报告撑爆。"""
+    from src.logsystem import LogConfig, configure, log_event, run_analysis, trace_scope
+
+    configure(LogConfig(log_dir=str(tmp_path), file_format="json",
+                        enable_async_analysis=False))
+    huge = "x" * 50_000
+    with trace_scope(business_id="b-big"):
+        log_event(logging.ERROR, "boom", status="failed",
+                  extra={"exception_type": "Boom", "stack_trace": huge})
+
+    report = run_analysis(str(tmp_path))
+    sample = report["error_details"][0]["sample_stack_trace"]
+    assert "已截断" in sample, "超长 stack_trace 未被截断"
+    assert len(sample) < 3_000, f"截断后仍过长：{len(sample)}"

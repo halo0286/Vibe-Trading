@@ -23,6 +23,7 @@ from typing import Any, Dict, Optional
 from src.config.accessor import get_env_value
 
 from .config import LogConfig
+from .constants import BASE_FIELDS, BUSINESS_FIELDS, MESSAGE_FIELD
 from .masking import MaskFilter
 from .trace import (
     get_business_id,
@@ -169,6 +170,9 @@ class _RotatingPidFileHandler(logging.Handler):
 
     def _record_fields(self, record: logging.LogRecord) -> Dict[str, Any]:
         ts = datetime.now(timezone.utc).isoformat()
+        # 字段清单来自 constants.py 的共享契约（BASE_FIELDS / BUSINESS_FIELDS /
+        # MESSAGE_FIELD），不再内联 —— 消费端 analyzer.py 引用同一份常量，
+        # 由 agent/tests/test_logsystem_profile_contracts.py 的字段级契约测试守住。
         fields: Dict[str, Any] = {
             "timestamp": ts,
             "pid": self.pid,
@@ -177,9 +181,10 @@ class _RotatingPidFileHandler(logging.Handler):
             "function": record.funcName,
             "line": record.lineno,
         }
-        for k in ("business_id", "trace_id", "span_id", "step", "status",
-                  "cost_ms", "error_code", "error_msg", "args", "result",
-                  "exception_type", "stack_trace", "exc_text", "business_done"):
+        assert tuple(fields) == BASE_FIELDS, (
+            f"基础字段与 constants.BASE_FIELDS 不一致：{tuple(fields)} != {BASE_FIELDS}"
+        )
+        for k in BUSINESS_FIELDS:
             # 优先读取 "ls_" 别名（log_business_event 对 LogRecord 保留属性
             # 冲突键加了前缀），否则回退到同名属性。
             if hasattr(record, f"ls_{k}"):
@@ -194,7 +199,7 @@ class _RotatingPidFileHandler(logging.Handler):
         if isinstance(extra, dict):
             for k, v in extra.items():
                 fields.setdefault(k, v)
-        fields["message"] = record.getMessage()
+        fields[MESSAGE_FIELD] = record.getMessage()
         return fields
 
     def close(self) -> None:

@@ -23,7 +23,16 @@ API 分层（P1 收敛）
 """
 
 from .config import LogConfig
-from .constants import KEYWORD_DICT, SENSITIVE_KEYS_DEFAULT
+from .constants import (
+    ANALYZED_FIELDS,
+    BASE_FIELDS,
+    BUSINESS_FIELDS,
+    KEYWORD_DICT,
+    KEYWORD_FIELDS,
+    MESSAGE_FIELD,
+    PRODUCED_FIELDS,
+    SENSITIVE_KEYS_DEFAULT,
+)
 from .masking import mask, mask_value, MaskFilter
 from .verdict import (
     SUCCESS_VERDICTS,
@@ -94,6 +103,13 @@ ADVANCED_API = (
     "MaskFilter",
     "SENSITIVE_KEYS_DEFAULT",
     "KEYWORD_DICT",
+    # 字段契约（生产端 logger.py 与消费端 analyzer.py 共用；含 __init__ 里的常量名）
+    "BASE_FIELDS",
+    "BUSINESS_FIELDS",
+    "MESSAGE_FIELD",
+    "PRODUCED_FIELDS",
+    "ANALYZED_FIELDS",
+    "KEYWORD_FIELDS",
     # 内部实现
     "GlobalLogger",
     "LoggedContext",

@@ -19,11 +19,24 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from . import logger as _logger_module
+from .constants import ANALYZED_FIELDS
 from .logger import get_logger, log_business_event
 
 _analysis_tasks: Dict[str, threading.Thread] = {}
 #: 保护 _analysis_tasks 的 check-then-act（见 run_analysis_async）
 _analysis_lock = threading.Lock()
+
+#: 报告里单个样本字段（error_msg / stack_trace）的最大字符数。
+#: stack_trace 动辄几万字符，直接塞进报告会让 JSON 膨胀且难读。
+_SAMPLE_MAX_LEN = 2000
+
+
+def _clip(value: Any, limit: int = _SAMPLE_MAX_LEN) -> str:
+    """把字段值截断成可放进报告的字符串（超长时显式标注截断了多少）。"""
+    s = value if isinstance(value, str) else str(value)
+    if len(s) <= limit:
+        return s
+    return s[:limit] + f"…(+{len(s) - limit} 字符已截断)"
 
 
 class LogAnalyzer:
@@ -144,14 +157,50 @@ class LogAnalyzer:
         msg_counter = Counter(r.get("message", "") for r in rows)
         high_freq = [{"message": m, "count": c} for m, c in msg_counter.most_common(10) if c > 5]
 
+        # ── 排障字段：异常类型 / 错误信息 / 堆栈（此前产出但未被分析消费）──────
+        # 契约见 constants.ANALYZED_FIELDS；缺字段不会报错，但会在
+        # `missing_contract_fields` 里显式列出，便于发现生产端漂移。
+        exc_types = Counter(
+            r.get("exception_type") for r in errors if r.get("exception_type")
+        )
+        err_groups: Dict[tuple, Dict[str, Any]] = {}
+        for r in errors:
+            etype = r.get("exception_type") or "(no exception_type)"
+            ecode = r.get("error_code") or "(no error_code)"
+            g = err_groups.setdefault(
+                (str(etype), str(ecode)),
+                {"exception_type": str(etype), "error_code": str(ecode),
+                 "count": 0, "sample_error_msg": "", "sample_stack_trace": ""},
+            )
+            g["count"] += 1
+            if not g["sample_error_msg"] and r.get("error_msg"):
+                g["sample_error_msg"] = _clip(r.get("error_msg"))
+            if not g["sample_stack_trace"] and r.get("stack_trace"):
+                g["sample_stack_trace"] = _clip(r.get("stack_trace"))
+        error_details = sorted(err_groups.values(), key=lambda x: x["count"], reverse=True)
+
         max_cost = max(costs) if costs else 0.0
         avg_cost = (sum(costs) / len(costs)) if costs else 0.0
+
+        # 契约字段可见性：分析器声明要读的字段，实际在日志里出现了哪些
+        observed = {k for k in ANALYZED_FIELDS if any(k in r for r in rows)}
+        missing_contract_fields = sorted(set(ANALYZED_FIELDS) - observed)
 
         # 优化建议
         suggestions = []
         top_err_codes = err_codes.most_common(5)
         if errors:
             suggestions.append(f"存在 {len(errors)} 条异常日志，建议优先处理错误码分布：{dict(top_err_codes)}")
+            if exc_types:
+                top_exc = exc_types.most_common(3)
+                suggestions.append(
+                    f"异常类型分布：{dict(top_exc)}；首个样本见 error_details[0].sample_error_msg"
+                )
+        if missing_contract_fields:
+            suggestions.append(
+                f"⚠️ 契约字段缺失：{missing_contract_fields} —— "
+                f"可能生产端改了字段名（见 constants.ANALYZED_FIELDS）"
+            )
         if slow_steps:
             suggestions.append(f"发现 {len(slow_steps)} 个慢步骤（>100ms），建议优化：{', '.join(s['step'] for s in slow_steps[:3])}")
         if high_freq:
@@ -174,9 +223,15 @@ class LogAnalyzer:
             },
             "error_count": len(errors),
             "error_codes": dict(err_codes),
+            "exception_types": dict(exc_types),
+            # 排障主入口：按 (exception_type, error_code) 分组，带首个样本
+            "error_details": error_details[:10],
             "status_distribution": dict(statuses),
             "slow_steps": slow_steps[:20],
             "high_freq_logs": high_freq,
+            # 契约字段可见性（生产/消费字段漂移在运行时也可见）
+            "fields_observed": sorted(observed),
+            "missing_contract_fields": missing_contract_fields,
             "suggestions": suggestions,
             # D-8 fix: utcnow() deprecated in 3.12+; use timezone-aware now()
             "analyzed_at": datetime.now(tz=timezone.utc).isoformat(),

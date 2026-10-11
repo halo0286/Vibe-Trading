@@ -7,6 +7,31 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Log field contract shared by producer and consumer.** `logsystem.constants`
+  now owns the field list (`BASE_FIELDS`, `BUSINESS_FIELDS`, `MESSAGE_FIELD`,
+  `PRODUCED_FIELDS`, `ANALYZED_FIELDS`, `KEYWORD_FIELDS`). `logger.py` derives
+  what it writes from those constants instead of an inline tuple, and
+  `analyzer.py` declares what it consumes from the same source. Previously both
+  sides hardcoded their own names: renaming a field raised nothing at compile or
+  test time and the consumer silently ignored it.
+- **Field-level contract tests** in `test_logsystem_profile_contracts.py`:
+  analyzed fields must be a subset of produced fields, `KEYWORD_DICT` must
+  document every produced field, and an end-to-end write must emit only
+  contract fields with all base fields present.
+- **Error detail in analysis reports.** `run_analysis` output now carries
+  `exception_types`, `error_details` (grouped by
+  `(exception_type, error_code)` with the first `error_msg` / `stack_trace`
+  sample, clipped to keep reports small) and `fields_observed` /
+  `missing_contract_fields`, so field drift is visible at runtime. These fields
+  were previously written but never analyzed.
+- `KEYWORD_DICT` now documents `exc_text`, `business_done` and `message`, which
+  the producer wrote but the dictionary (its documented field standard) omitted.
+
+### Changed
+
+- `logsystem.constants` exports the field-contract constants; `logger.py`
+  asserts its base fields stay in sync with `BASE_FIELDS`.
+
 - **Editable scheduled delivery and rich Email reports** (#1649, #1680).
   Choose a configured channel and destination, edit existing schedules, and
   select plain text, sanitized HTML or a PDF attachment for Email across Web,
